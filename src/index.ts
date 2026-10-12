@@ -1,8 +1,15 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
+import os from "os";
+import path from "path";
 import { DreamsDB } from "./core/db";
+import { wrapSystemPromptInjection } from "./core/prompt_injector";
 import { dream_learn, dream_recall } from "./tools";
 
 const db = new DreamsDB();
+
+// Raiz das memórias Dreams (~/.config/opencode/dreams):
+//   collective/COLLECTIVE_MEMORY.md + personas/<agent>.md
+const DREAMS_DIR = path.join(os.homedir(), ".config", "opencode", "dreams");
 
 // Hook de eventos LIMPO: a telemetria trivial de ciclo de vida
 // ("Sessão finalizada no diretório...", "Sessão compactada...",
@@ -10,7 +17,8 @@ const db = new DreamsDB();
 // (DEF-10 já as classificava como triviais). O conteúdo real das conversas
 // agora é ingerido pelo Light Sleep via `session_reader` (leitura read-only
 // do opencode.db) e destilado pelo MimoSynthesizer no REM Sleep.
-export const serverPlugin: Plugin = async () => {
+export const serverPlugin: Plugin = async (input) => {
+  const { client } = input;
   return {
     tool: {
       dream_learn: tool({
@@ -36,6 +44,27 @@ export const serverPlugin: Plugin = async () => {
           return dream_recall(args, db);
         },
       }),
+    },
+
+    // Hook de injecao de memorias Dreams no system prompt do chat.
+    // Contrato SDK: experimental.chat.system.transform(input, output) => Promise<void>
+    // Fail-safe total: qualquer erro de I/O (SQLite, filesystem, resolucao
+    // de agente) e engolido por try/catch — o chat do usuario nunca quebra.
+    "experimental.chat.system.transform": async (hookInput, output) => {
+      try {
+        const memoryBlock = await wrapSystemPromptInjection(
+          DREAMS_DIR,
+          hookInput.sessionID,
+          client
+        );
+        if (memoryBlock) {
+          output.system.push(memoryBlock);
+        }
+      } catch (e) {
+        // DEFESA EM PROFUNDIDADE: o injector ja tem try/catch proprio e
+        // retorna null em falha; este catch cobre bugs inesperados no hook.
+        console.debug("[Dreams] system.prompt injection skipped:", e);
+      }
     },
 
     dispose: async () => {

@@ -528,7 +528,7 @@ describe("mimo_synthesizer — Cascata de Modelos, Teto de Diálogo e Resiliênc
 
   test("MimoSynthesizer tenta cascata de modelos e agrega erros ao falhar com binário inexistente", async () => {
     const synth = new MimoSynthesizer({
-      binary: "/bin/non_existent_opencode_binary",
+      binary: "/etc/hostname",
       models: ["opencode/mimo-v2.6-flash-free", "google/antigravity-gemini-3.7-flash"],
     });
 
@@ -540,11 +540,11 @@ describe("mimo_synthesizer — Cascata de Modelos, Teto de Diálogo e Resiliênc
   test("MimoSynthesizer aplica teto de 120.000 caracteres no diálogo com truncamento invertido", async () => {
     const hugeDialogue = "B".repeat(150_000);
     const synth = new MimoSynthesizer({
-      binary: "/bin/non_existent_opencode_binary",
+      binary: "/etc/hostname",
       maxDialogueChars: 120_000,
     });
 
-    // Deve truncar e falhar no spawn do binário inexistente, comprovando o teto
+    // Deve truncar e falhar no spawn do binário não-executável (EACCES), comprovando o teto
     await expect(synth.synthesize(hugeDialogue)).rejects.toThrow(
       "Nenhum modelo de IA disponível para síntese cognitiva"
     );

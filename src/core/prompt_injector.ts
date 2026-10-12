@@ -7,8 +7,10 @@
  *
  * O nome da persona vem da sessão corrente — resolvido via SDK client
  * (`client.session.get` / `client.session.messages`) e, em último caso,
- * via SQLite do OpenCode aberto em SOMENTE LEITURA (`session.agent` →
- * `session_v2.agent` → `message.data.$.agent`).
+ * via SQLite do OpenCode aberto em SOMENTE LEITURA (`title` →
+ * `session.agent` → `session_v2.agent` → `message.data.$.agent`).
+ * Em sessões do Ensemble, a assinatura do título (`@<agente> teammate|
+ * subagent`) tem precedência sobre `session.agent` (herdado do lead).
  *
  * Garantias contratuais:
  *  - ANTI-DUMPING: cada arquivo é limitado a `MAX_MEMORY_LINES` (150) linhas
@@ -198,6 +200,32 @@ function isValidAgentName(agentName: unknown): agentName is string {
 }
 
 /**
+ * Regex que captura o nome do agente após o `@` quando o título traz a
+ * assinatura de teammate/subagent do Ensemble
+ * (ex.: `clara (@clara teammate)`, `Auditoria Diana (@diana subagent)`).
+ */
+const TITLE_AGENT_RE = /@([A-Za-z0-9._-]+)\s+(?:teammate|subagent)/i;
+
+/**
+ * Extrai o nome do agente a partir do título da sessão.
+ *
+ * Em sessões do Ensemble, o `session.agent` no SQLite herda o nome do lead
+ * (`dante`, `valerio`), mas o título sempre traz a assinatura real do
+ * teammate/subagent no padrão `@<agent> (teammate|subagent)`. Esta função
+ * pura extrai esse nome e o valida com as mesmas regras de `normalizeAgent`.
+ *
+ * @param title Título da sessão (string) ou qualquer valor não-string.
+ * @returns Nome do agente normalizado, ou `null` se o padrão não casar ou o
+ *          nome capturado for inválido. NUNCA lança exceção.
+ */
+export function extractAgentFromTitle(title: unknown): string | null {
+  if (typeof title !== "string") return null;
+  const match = TITLE_AGENT_RE.exec(title);
+  if (!match || !match[1]) return null;
+  return normalizeAgent(match[1]);
+}
+
+/**
  * Normaliza um nome de agente vindo de fonte externa (DB/SDK).
  *
  * Aceita formatos como `dante`, `agent:dante`, `opencode/dante`; descarta
@@ -244,6 +272,29 @@ function pickAgent(value: any): string | null {
 }
 
 /**
+ * Extrai o `title` de um payload de sessão (formatos comuns do SDK) e resolve
+ * o agente real do Ensemble via `extractAgentFromTitle`.
+ *
+ * @returns Nome do agente extraído do título, ou `null` se ausente/inválido.
+ */
+function pickAgentFromTitle(value: any): string | null {
+  const payload = unwrap(value);
+  if (!payload || typeof payload !== "object") return null;
+
+  const candidates: unknown[] = [
+    payload.title,
+    payload.info?.title,
+    payload.properties?.info?.title,
+    payload.metadata?.title,
+  ];
+  for (const candidate of candidates) {
+    const agent = extractAgentFromTitle(candidate);
+    if (agent) return agent;
+  }
+  return null;
+}
+
+/**
  * Varre a lista de mensagens da mais recente para a mais antiga e retorna o
  * primeiro `agent` explícito (tipicamente `UserMessage.agent`).
  *
@@ -272,6 +323,9 @@ function pickAgentFromMessages(value: any): string | null {
  * Tenta resolver o agente pela API do SDK (cliente HTTP do daemon).
  *
  * Ordem: `client.session.get` → `client.session.messages`.
+ * Dentro de cada chamada, o título (assinatura `@teammate`/`@subagent` do
+ * Ensemble) tem PRECEDÊNCIA sobre `session.agent`, que em sessões criadas
+ * pelo lead herda o nome errado (`dante`, `valerio`).
  * Qualquer erro é engolido (fail-soft) e a tentativa seguinte é usada.
  */
 async function readAgentViaClient(sessionID: string, client: any): Promise<string | null> {
@@ -281,6 +335,9 @@ async function readAgentViaClient(sessionID: string, client: any): Promise<strin
   try {
     if (typeof sessionApi?.get === "function") {
       const response = await sessionApi.get({ path: { id: sessionID } });
+      // Título (teammate/subagent do Ensemble) vence o agent herdado do lead.
+      const fromTitle = pickAgentFromTitle(response);
+      if (fromTitle) return fromTitle;
       const agent = pickAgent(response);
       if (agent) return agent;
     }
@@ -304,9 +361,12 @@ async function readAgentViaClient(sessionID: string, client: any): Promise<strin
 /**
  * Lê o agente da sessão direto do SQLite do OpenCode em modo SOMENTE LEITURA.
  *
- * Prioridade: `session.agent` → `session_v2.agent` → `message.data.$.agent`
- * (mensagem mais recente da sessão). Tabelas vindo de whitelist fixa; todos
- * os valores passam por `?` posicionado (sem interpolação de SQL).
+ * Prioridade por tabela: `title` (assinatura `@teammate`/`@subagent` do
+ * Ensemble, que prevalece sobre o `agent` herdado do lead) → `session.agent`
+ * → `session_v2.agent` → `message.data.$.agent` (mensagem mais recente).
+ * Tabelas vindo de whitelist fixa; todos os valores passam por `?`
+ * posicionado (sem interpolação de SQL). Se a coluna `title` não existir no
+ * schema, o SELECT falha e o catch fail-soft tenta a próxima tabela.
  *
  * Nunca lança: banco ausente/bloqueado/corrompido → `null`.
  */
@@ -321,12 +381,30 @@ function readAgentViaDb(sessionID: string, dbPath?: string): string | null {
     for (const table of AGENT_TABLES) {
       try {
         const row = db
-          .query<{ agent: unknown }, [string]>(`SELECT agent FROM \`${table}\` WHERE id = ?`)
+          .query<{ agent: unknown; title: unknown }, [string]>(
+            `SELECT agent, title FROM \`${table}\` WHERE id = ?`
+          )
           .get(sessionID);
+        // Título (teammate/subagent do Ensemble) vence o agent herdado do lead.
+        const fromTitle = extractAgentFromTitle(row?.title);
+        if (fromTitle) return fromTitle;
         const agent = normalizeAgent(row?.agent);
         if (agent) return agent;
       } catch {
-        /* tabela inexistente neste schema → tenta a próxima */
+        // Coluna `title` ausente neste schema (só `agent`) ou tabela
+        // inexistente: tenta o SELECT mínimo antes de seguir para a próxima
+        // tabela, para não perder o fallback `session.agent`/`session_v2.agent`.
+        try {
+          const row = db
+            .query<{ agent: unknown }, [string]>(
+              `SELECT agent FROM \`${table}\` WHERE id = ?`
+            )
+            .get(sessionID);
+          const agent = normalizeAgent(row?.agent);
+          if (agent) return agent;
+        } catch {
+          /* tabela inexistente neste schema → tenta a próxima */
+        }
       }
     }
 
@@ -364,9 +442,12 @@ function readAgentViaDb(sessionID: string, dbPath?: string): string | null {
  * Identifica o nome do agente associado à sessão corrente.
  *
  * Estratégia (cada etapa é isolada por try/catch):
- *   1. SDK client — `session.get` e depois `session.messages`;
- *   2. SQLite read-only — `session.agent`, `session_v2.agent` e por fim
- *      `message.data.$.agent` da sessão.
+ *   1. SDK client — `session.get` (título → agent) e depois `session.messages`;
+ *   2. SQLite read-only — `title` (precedência), `session.agent`,
+ *      `session_v2.agent` e por fim `message.data.$.agent` da sessão.
+ *
+ * Em sessões do Ensemble, o título (`@<agente> teammate|subagent`) tem
+ * precedência sobre `session.agent`, que herda o nome do lead.
  *
  * @param sessionID ID da sessão (`ses_...`); `undefined` → `null`.
  * @param client    Cliente SDK do OpenCode (pode ser ausente/`null`).

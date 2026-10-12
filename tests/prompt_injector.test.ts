@@ -14,6 +14,7 @@ import {
   readCollectiveMemory,
   readPersonaMemory,
   resolveSessionAgent,
+  extractAgentFromTitle,
   buildSystemPromptInjection,
   wrapSystemPromptInjection,
   defaultDreamsDir,
@@ -193,7 +194,7 @@ describe("prompt_injector — fallback gracioso (nunca lança)", () => {
   });
 
   test("resolveSessionAgent: cliente real com porta fechada → fail-soft null (rede falha de verdade)", async () => {
-    const deadClient = createOpencodeClient({ baseURL: "http://127.0.0.1:1/" });
+    const deadClient = createOpencodeClient({ baseUrl: "http://127.0.0.1:1/" });
     const missingDb = path.join(TEST_ROOT, "opencode_falso_2.db");
     const agent = await resolveSessionAgent("ses_fake_dead_port", deadClient, missingDb);
     expect(agent).toBeNull();
@@ -253,6 +254,191 @@ describe("prompt_injector — resolução de agente via SQLite real (/tmp)", () 
 
     expect(await resolveSessionAgent("ses_nao_esta_la", null, dbPath)).toBeNull();
   });
+});
+
+// ---------------------------------------------------------------------------
+// 4b. Extração de persona a partir do título (função pura, sem I/O)
+// ---------------------------------------------------------------------------
+describe("prompt_injector — extractAgentFromTitle (função pura)", () => {
+  test("'clara (@clara teammate)' → 'clara'", () => {
+    expect(extractAgentFromTitle("clara (@clara teammate)")).toBe("clara");
+  });
+
+  test("'tulio-engine (@tulio teammate)' → 'tulio' (prefixo do título é irrelevante)", () => {
+    expect(extractAgentFromTitle("tulio-engine (@tulio teammate)")).toBe("tulio");
+  });
+
+  test("'Auditoria Diana Dreams Prompt Injection (@diana subagent)' → 'diana'", () => {
+    expect(extractAgentFromTitle("Auditoria Diana Dreams Prompt Injection (@diana subagent)")).toBe("diana");
+  });
+
+  test("título de chat comum sem assinatura → null", () => {
+    expect(extractAgentFromTitle("Chat normal sobre arquitetura")).toBeNull();
+  });
+
+  test("anti-traversal: nome inválido após o '@' → null (nunca lança)", () => {
+    expect(extractAgentFromTitle("Título com formato inválido @../escape teammate")).toBeNull();
+    expect(extractAgentFromTitle("@a/b teammate")).toBeNull();
+    expect(extractAgentFromTitle("@.oculto teammate")).toBeNull();
+  });
+
+  test("fail-safe: entradas não-string e padrões ausentes → null sem exceção", () => {
+    expect(extractAgentFromTitle(undefined)).toBeNull();
+    expect(extractAgentFromTitle(null)).toBeNull();
+    expect(extractAgentFromTitle(42)).toBeNull();
+    expect(extractAgentFromTitle({})).toBeNull();
+    expect(extractAgentFromTitle("")).toBeNull();
+    expect(extractAgentFromTitle("@clara")).toBeNull();
+    expect(extractAgentFromTitle("clara (@clara)")).toBeNull();
+    expect(extractAgentFromTitle("clara (@clara colega)")).toBeNull();
+  });
+
+  test("case-insensitive nos papéis: '@KaEL SUBAGENT' → 'KaEL' normalizado", () => {
+    expect(extractAgentFromTitle("sessão (@KaEL SUBAGENT)")).toBe("KaEL");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4c. Precedência do título sobre session.agent (SQLite real em /tmp)
+// ---------------------------------------------------------------------------
+describe("prompt_injector — título do Ensemble prevalece sobre o agent herdado (SQLite real)", () => {
+  beforeEach(() => resetDreamsDir());
+
+  test("agent='dante' + title='clara (@clara teammate)' → resolve 'clara' (sobrepõe o lead)", async () => {
+    const dbPath = path.join(TEST_ROOT, "sessions_title_clara.db");
+    const db = new Database(dbPath);
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT, title TEXT)");
+    db.query("INSERT INTO session (id, agent, title) VALUES (?, ?, ?)").run(
+      "ses_titulo_clara",
+      "dante",
+      "clara (@clara teammate)"
+    );
+    db.close();
+
+    expect(await resolveSessionAgent("ses_titulo_clara", null, dbPath)).toBe("clara");
+  });
+
+  test("agent='dante' + title de chat sem assinatura → resolve 'dante' normalmente", async () => {
+    const dbPath = path.join(TEST_ROOT, "sessions_title_dante.db");
+    const db = new Database(dbPath);
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT, title TEXT)");
+    db.query("INSERT INTO session (id, agent, title) VALUES (?, ?, ?)").run(
+      "ses_titulo_dante",
+      "dante",
+      "Chat normal sobre arquitetura"
+    );
+    db.close();
+
+    expect(await resolveSessionAgent("ses_titulo_dante", null, dbPath)).toBe("dante");
+  });
+
+  test("agent='valerio' + title='Auditoria Diana (@diana subagent)' → resolve 'diana'", async () => {
+    const dbPath = path.join(TEST_ROOT, "sessions_title_diana.db");
+    const db = new Database(dbPath);
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT, title TEXT)");
+    db.query("INSERT INTO session (id, agent, title) VALUES (?, ?, ?)").run(
+      "ses_titulo_diana",
+      "valerio",
+      "Auditoria Diana Dreams Prompt Injection (@diana subagent)"
+    );
+    db.close();
+
+    expect(await resolveSessionAgent("ses_titulo_diana", null, dbPath)).toBe("diana");
+  });
+
+  test("título inválido (anti-traversal) + agent válido → cai no fallback do agent herdado", async () => {
+    const dbPath = path.join(TEST_ROOT, "sessions_title_traversal.db");
+    const db = new Database(dbPath);
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT, title TEXT)");
+    db.query("INSERT INTO session (id, agent, title) VALUES (?, ?, ?)").run(
+      "ses_titulo_traversal",
+      "dante",
+      "Título com formato inválido @../escape teammate"
+    );
+    db.close();
+
+    expect(await resolveSessionAgent("ses_titulo_traversal", null, dbPath)).toBe("dante");
+  });
+
+  test("schema legado: tabela session sem coluna title ainda lê session.agent (fail-soft)", async () => {
+    const dbPath = path.join(TEST_ROOT, "sessions_sem_coluna_title.db");
+    const db = new Database(dbPath);
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT)");
+    db.query("INSERT INTO session (id, agent) VALUES (?, ?)").run("ses_sem_title", "cris");
+    db.close();
+
+    expect(await resolveSessionAgent("ses_sem_title", null, dbPath)).toBe("cris");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4d. Precedência do título no payload do cliente SDK (servidor HTTP REAL)
+// ---------------------------------------------------------------------------
+// Servidor HTTP genuíno em porta efêmera (Bun.serve) + cliente SDK real.
+// Nada é stubado: a resposta vem por rede de verdade, como no daemon.
+describe("prompt_injector — payload do cliente com título do Ensemble (HTTP real)", () => {
+  const payloads: Record<string, unknown> = {
+    ses_http_clara: { id: "ses_http_clara", agent: "dante", title: "clara (@clara teammate)" },
+    ses_http_diana: {
+      id: "ses_http_diana",
+      info: { agent: "dante", title: "Auditoria Diana (@diana subagent)" },
+    },
+    ses_http_dante: { id: "ses_http_dante", agent: "dante", title: "Chat normal sobre arquitetura" },
+  };
+
+  let server: ReturnType<typeof Bun.serve>;
+  let baseUrl: string;
+
+  beforeAll(() => {
+    server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        const url = new URL(req.url);
+        const match = url.pathname.match(/^\/session\/([^/]+)$/);
+        const payload = match ? payloads[match[1]] : undefined;
+        if (!payload) {
+          return new Response(JSON.stringify({ message: "not found" }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    baseUrl = `http://127.0.0.1:${server.port}`;
+  });
+
+  afterAll(() => {
+    server?.stop(true);
+  });
+
+  test("payload com title assinado resolve 'clara' mesmo com agent='dante' do lead", async () => {
+    const client = createOpencodeClient({ baseUrl });
+    const missingDb = path.join(TEST_ROOT, "http_sem_banco_1.db");
+    expect(await resolveSessionAgent("ses_http_clara", client, missingDb)).toBe("clara");
+  }, 15000);
+
+  test("title dentro de info.title também prevalece → 'diana'", async () => {
+    const client = createOpencodeClient({ baseUrl });
+    const missingDb = path.join(TEST_ROOT, "http_sem_banco_2.db");
+    expect(await resolveSessionAgent("ses_http_diana", client, missingDb)).toBe("diana");
+  }, 15000);
+
+  test("title sem assinatura → cai no agent herdado 'dante'", async () => {
+    const client = createOpencodeClient({ baseUrl });
+    const missingDb = path.join(TEST_ROOT, "http_sem_banco_3.db");
+    expect(await resolveSessionAgent("ses_http_dante", client, missingDb)).toBe("dante");
+  }, 15000);
+
+  test("404 genuíno do servidor + banco inexistente → null fail-soft", async () => {
+    const client = createOpencodeClient({ baseUrl });
+    const missingDb = path.join(TEST_ROOT, "http_sem_banco_4.db");
+    expect(await resolveSessionAgent("ses_http_inexistente", client, missingDb)).toBeNull();
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -322,7 +508,7 @@ describe("hook experimental.chat.system.transform (serverPlugin real)", () => {
 
   beforeAll(async () => {
     hooks = await serverPlugin({
-      client: createOpencodeClient({ baseURL: "http://127.0.0.1:1/" }),
+      client: createOpencodeClient({ baseUrl: "http://127.0.0.1:1/" }),
       project: { id: "prj_test", worktree: null } as any,
       directory: pluginDir,
       worktree: pluginDir,

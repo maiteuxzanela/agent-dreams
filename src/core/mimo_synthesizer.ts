@@ -7,8 +7,17 @@
  *   1º Alvo: `opencode/mimo-v2.6-flash-free`
  *   2º Alvo (fallback se Mimo falhar/timeout/cota): `google/antigravity-gemini-3.7-flash`
  *
- * Comando executado:
- *   opencode run --model <model> "<prompt>"
+ * Comando executado (TICKET-DREAMS-01A — transporte seguro de prompt):
+ *   opencode run --pure --title "Dreams Synthesis" --dir /tmp --model <model>
+ *
+ * O prompt NÃO trafega em `argv`: ele é escrito no STDIN do subprocesso e o
+ * canal é fechado (`stdin.end()`). Isso elimina dois defeitos de runtime POSIX:
+ *   - E2BIG: o kernel Linux limita cada argumento de `execve` a `MAX_ARG_STRLEN`
+ *     (128 KiB). 120 KB de diálogo acentuado (2 bytes/caractere em UTF-8) mais a
+ *     rubrica estourava o limite e abortava a cascata inteira;
+ *   - Exposição: o diálogo inteiro ficava visível em claro em `/proc/<pid>/cmdline`.
+ * O teto é medido em BYTES UTF-8 reais (`Buffer.byteLength`), nunca em `.length`
+ * (UTF-16). A flag `--pure` suprime plugins/sessões recursivas (anti auto-ingestão).
  *
  * Contrato de saída do modelo: EXCLUSIVAMENTE um array JSON de memórias
  *
@@ -30,6 +39,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { redactSecrets } from "./security";
 
 /**
  * Resolve o caminho absoluto do executável opencode CLI com fallbacks de diretório.
@@ -59,7 +69,7 @@ export function resolveOpencodeBinaryPath(explicit?: string): string {
 export const DEFAULT_MIMO_MODEL = "opencode/mimo-v2.6-flash-free";
 
 /** Modelo secundário de fallback na cascata de destilação (cota gratuita Antigravity). */
-export const DEFAULT_FALLBACK_MODEL = "google/antigravity-gemini-3.7-flash";
+export const DEFAULT_FALLBACK_MODEL = "google/antigravity-gemini-3.8-flash";
 
 /** Categorias aceitas pelo DreamsDB / dream_learn. */
 export const MEMORY_CATEGORIES = [
@@ -97,6 +107,8 @@ export interface SynthesisResult {
   dropped: number;
   /** Tamanho do prompt efetivamente enviado ao modelo (chars). */
   promptChars: number;
+  /** Tamanho do prompt efetivamente enviado ao modelo (bytes UTF-8). */
+  promptBytes: number;
   /** Modelo efetivamente utilizado na síntese. */
   modelUsed: string;
 }
@@ -115,6 +127,8 @@ export interface MimoSynthesizerOptions {
   timeoutMs?: number;
   /** Corte máximo do diálogo injetado no prompt (chars). Padrão: 120000. */
   maxDialogueChars?: number;
+  /** Teto absoluto do prompt final em BYTES UTF-8. Padrão: MAX_PROMPT_BYTES (128000). */
+  maxPromptBytes?: number;
   /** Limite de memórias retornadas. Padrão: 20. */
   maxMemories?: number;
   /** Diretório de trabalho do subprocesso. Padrão: cwd atual. */
@@ -124,14 +138,56 @@ export interface MimoSynthesizerOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Teto de payload em BYTES UTF-8 (TICKET-DREAMS-01A)
+// ---------------------------------------------------------------------------
+
+/**
+ * Limite absoluto e seguro do prompt em BYTES UTF-8.
+ *
+ * Referência POSIX/Linux: o kernel limita cada argumento individual de `execve`
+ * a `MAX_ARG_STRLEN` = 128 KiB (131.072 bytes). Adotamos 128.000 bytes como teto
+ * operacional com folga, medindo o payload real — nunca `.length`, que conta
+ * unidades UTF-16 e subestima textos acentuados (2 bytes por caractere).
+ */
+export const MAX_PROMPT_BYTES = 128_000;
+
+/** Marcador injetado quando a cauda do diálogo substitui o início descartado. */
+const OMISSION_MARKER = "[… início do dia omitido]\n\n";
+
+/** Comprimento real do texto em bytes UTF-8 (≠ String.length, que é UTF-16). */
+export function utf8ByteLength(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
+/**
+ * Trunca `text` preservando a CAUDA para caber em `maxBytes` bytes UTF-8,
+ * descartando qualquer caractere multibyte partido na fronteira do corte.
+ */
+export function truncateUtf8Tail(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const buffer = Buffer.from(text, "utf8");
+  if (buffer.length <= maxBytes) return text;
+  const tail = buffer.subarray(buffer.length - maxBytes).toString("utf8");
+  // O corte por bytes pode iniciar no meio de um code point: o decode emite
+  // U+FFFD na fronteira. Removemos esses replacement chars antes de continuar.
+  return tail.replace(/^\uFFFD+/, "").trimStart();
+}
+
+// ---------------------------------------------------------------------------
 // Prompt
 // ---------------------------------------------------------------------------
 
 /**
  * Monta o prompt de destilação cognitiva. Instruções estritas: o modelo deve
  * responder SOMENTE com o array JSON (sem prosa, sem cercas markdown).
+ *
+ * HARDENING (TICKET-DREAMS-04B): o diálogo é redigido por `redactSecrets`
+ * antes de entrar no prompt — nenhuma credencial/segredo deve ser enviada ao
+ * modelo externo. A redação é idempotente, então reaplicá-la sobre um diálogo
+ * já redigido pelo chamador é inócuo.
  */
 export function buildSynthesisPrompt(dialogue: string, maxMemories: number = 20): string {
+  const safeDialogue = redactSecrets(dialogue);
   return [
     "Você é o Destilador Cognitivo de Memórias do ecossistema OpenCode.",
     "Analise o diálogo passado abaixo e extraia APENAS lições aprendidas com valor preditivo para o futuro.",
@@ -147,7 +203,7 @@ export function buildSynthesisPrompt(dialogue: string, maxMemories: number = 20)
     "8. PROIBIDO inventar fatos que não estejam no diálogo.",
     "",
     "<dialogo>",
-    dialogue,
+    safeDialogue,
     "</dialogo>",
     "",
     "Lembrete: sua ÚNICA saída é o array JSON.",
@@ -224,7 +280,9 @@ export function validateMemory(raw: unknown): SynthesizedMemory | null {
   const candidate = raw as Record<string, unknown>;
 
   if (typeof candidate.fact !== "string") return null;
-  const fact = candidate.fact.replace(/\s+/g, " ").trim();
+  // HARDENING (TICKET-DREAMS-04B): redige segredos ANTES da normalização — o
+  // fato retornado aqui é o que será persistido no DreamsDB pelo REM Sleep.
+  const fact = redactSecrets(candidate.fact).replace(/\s+/g, " ").trim();
   if (fact.length < 10) return null; // abaixo disso não é uma lição útil
 
   const category = normalizeCategory(candidate.category);
@@ -349,10 +407,16 @@ interface SpawnOutcome {
   spawnError: Error | null;
 }
 
-/** Executa o OpenCode CLI com timeout, kill escalonado e cap de saída. */
+/**
+ * Executa o OpenCode CLI com timeout, kill escalonado e cap de saída.
+ *
+ * O prompt é entregue via STDIN (`options.stdin`): o canal é aberto como pipe,
+ * recebe o payload em UTF-8 e é fechado (`end`) — nunca entra em `argv`.
+ * Quando `stdin` é indefinido, o canal é `ignore` (comportamento legado).
+ */
 function runOpencode(
   argv: string[],
-  options: { timeoutMs: number; cwd?: string }
+  options: { timeoutMs: number; cwd?: string; stdin?: string }
 ): Promise<SpawnOutcome> {
   return new Promise((resolve) => {
     const MAX_OUTPUT_BYTES = 4 * 1024 * 1024; // 4 MB por stream
@@ -362,11 +426,12 @@ function runOpencode(
     let settled = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
 
+    const hasStdinPayload = typeof options.stdin === "string";
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(argv[0], argv.slice(1), {
         cwd: options.cwd,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [hasStdinPayload ? "pipe" : "ignore", "pipe", "pipe"],
         env: process.env,
       });
     } catch (error) {
@@ -379,6 +444,19 @@ function runOpencode(
         spawnError: error as Error,
       });
       return;
+    }
+
+    if (hasStdinPayload) {
+      // EPIPE/ECONNRESET é esperado se o binário morrer antes de consumir o
+      // prompt; o erro real do processo é capturado por "error"/"close".
+      child.stdin?.on("error", () => {
+        /* canal stdin encerrado pelo filho — erro tratado pelo spawn */
+      });
+      try {
+        child.stdin?.end(options.stdin, "utf8");
+      } catch {
+        /* stdin indisponível: a falha de spawn é reportada pelos listeners */
+      }
     }
 
     const timer = setTimeout(() => {
@@ -436,6 +514,7 @@ export class MimoSynthesizer {
   private readonly binary: string;
   private readonly timeoutMs: number;
   private readonly maxDialogueChars: number;
+  private readonly maxPromptBytes: number;
   private readonly maxMemories: number;
   private readonly cwd: string | undefined;
   private readonly onError: ((error: unknown) => void) | undefined;
@@ -452,9 +531,52 @@ export class MimoSynthesizer {
     this.timeoutMs =
       Number.isFinite(candidate) && candidate > 0 ? candidate : 180_000;
     this.maxDialogueChars = options.maxDialogueChars ?? 120_000;
+    this.maxPromptBytes = options.maxPromptBytes ?? MAX_PROMPT_BYTES;
     this.maxMemories = options.maxMemories ?? 20;
     this.cwd = options.cwd;
     this.onError = options.onError;
+  }
+
+  /**
+   * Monta o prompt aplicando DUPLO teto (TICKET-DREAMS-01A):
+   *   1. teto em caracteres (`maxDialogueChars`) — preserva a cauda do dia;
+   *   2. teto em BYTES UTF-8 (`maxPromptBytes`) — garante folga sob
+   *      `MAX_ARG_STRLEN` (128 KiB) e transporte estável por stdin.
+   * Como o prompt é `overhead(estático) + diálogo`, medimos o overhead com um
+   * diálogo vazio e truncamos a CAUDA do diálogo pelos bytes restantes.
+   */
+  private buildCappedPrompt(source: string): string {
+    const charCapped =
+      source.length > this.maxDialogueChars
+        ? OMISSION_MARKER + source.slice(-this.maxDialogueChars).trimStart()
+        : source;
+
+    let prompt = buildSynthesisPrompt(charCapped, this.maxMemories);
+    if (utf8ByteLength(prompt) <= this.maxPromptBytes) return prompt;
+
+    const overheadBytes = utf8ByteLength(buildSynthesisPrompt("", this.maxMemories));
+    let budget = Math.max(
+      0,
+      this.maxPromptBytes - overheadBytes - utf8ByteLength(OMISSION_MARKER)
+    );
+    prompt = buildSynthesisPrompt(
+      OMISSION_MARKER + truncateUtf8Tail(source, budget),
+      this.maxMemories
+    );
+
+    // Rede de segurança: converge em no máximo algumas iterações caso o
+    // overhead medido difira (nunca deve ocorrer, mas o teto é inviolável).
+    let guard = 0;
+    while (utf8ByteLength(prompt) > this.maxPromptBytes && budget > 0 && guard < 8) {
+      const excess = utf8ByteLength(prompt) - this.maxPromptBytes;
+      budget = Math.max(0, budget - excess - 1);
+      prompt = buildSynthesisPrompt(
+        OMISSION_MARKER + truncateUtf8Tail(source, budget),
+        this.maxMemories
+      );
+      guard++;
+    }
+    return prompt;
   }
 
   /**
@@ -462,8 +584,8 @@ export class MimoSynthesizer {
    * Lança erro explícito se nenhum modelo estiver disponível / responder com JSON válido.
    */
   async synthesize(dialogue: string): Promise<SynthesisResult> {
-    const source = (dialogue ?? "").trim();
-    if (source === "") {
+    const rawDialogue = (dialogue ?? "").trim();
+    if (rawDialogue === "") {
       return {
         memories: [],
         source: "none",
@@ -471,19 +593,22 @@ export class MimoSynthesizer {
         error: null,
         dropped: 0,
         promptChars: 0,
+        promptBytes: 0,
         modelUsed: "none",
       };
     }
+
+    // HARDENING (TICKET-DREAMS-04B): redige segredos ANTES de cortar/empacotar
+    // o diálogo, garantindo que nada sensível chegue ao subprocesso externo e
+    // que o teto `maxDialogueChars` não seja consumido por credenciais.
+    const source = redactSecrets(rawDialogue);
 
     if (process.env.DREAMS_OFFLINE === "1") {
       throw new Error("Nenhum modelo de IA disponível para síntese cognitiva (DREAMS_OFFLINE=1)");
     }
 
-    const dialogueCapped =
-      source.length > this.maxDialogueChars
-        ? "[… início do dia omitido]\n\n" + source.slice(-this.maxDialogueChars).trimStart()
-        : source;
-    const prompt = buildSynthesisPrompt(dialogueCapped, this.maxMemories);
+    // TICKET-DREAMS-01A: duplo teto (chars + bytes UTF-8 reais).
+    const prompt = this.buildCappedPrompt(source);
 
     const modelsToTry: string[] =
       this.models.length > 0
@@ -493,12 +618,25 @@ export class MimoSynthesizer {
     const attemptErrors: string[] = [];
 
     for (const currentModel of modelsToTry) {
-      const argv = [this.binary, "run", "--model", currentModel, prompt];
+      // TICKET-DREAMS-01A: `--pure` suprime plugins/sessões recursivas e o
+      // prompt vai por STDIN (nunca em `argv`, evitando E2BIG e /proc/cmdline).
+      const argv = [
+        this.binary,
+        "run",
+        "--pure",
+        "--title",
+        "Dreams Synthesis",
+        "--dir",
+        "/tmp",
+        "--model",
+        currentModel,
+      ];
       let outcome: SpawnOutcome;
       try {
         outcome = await runOpencode(argv, {
           timeoutMs: this.timeoutMs,
           cwd: this.cwd,
+          stdin: prompt,
         });
       } catch (error) {
         const msg = `falha ao spawnar ${this.binary} para ${currentModel}: ${String(error)}`;
@@ -544,6 +682,7 @@ export class MimoSynthesizer {
           error: null,
           dropped,
           promptChars: prompt.length,
+          promptBytes: utf8ByteLength(prompt),
           modelUsed: currentModel,
         };
       }

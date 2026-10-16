@@ -1,8 +1,8 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import { DreamsDB } from "../src/core/db";
+import { DreamsDB, CATEGORY_WEIGHTS, sanitizeFts5Query } from "../src/core/db";
 import { SleepCycle } from "../src/core/sleep_cycle";
-import { dream_learn } from "../src/tools";
+import { dream_learn, dream_recall } from "../src/tools";
 import {
   readRecentDialogues,
   summarizeDialogues,
@@ -214,7 +214,7 @@ describe("OpenCode Dreams Plugin — Banco e Ciclo Local", () => {
 });
 
 describe("src/index.ts E2E (HOME isolado em /tmp)", () => {
-  test("DEF-05/DEF-09: log diário calculado na escrita e db.close() no dispose", () => {
+  test("DEF-05/DEF-09/4C: log diário na escrita e reabertura transparente do DB após dispose", () => {
     const tmpHome = path.join("/tmp", `opencode_dreams_index_${Date.now()}`);
     fs.mkdirSync(tmpHome, { recursive: true });
     try {
@@ -241,7 +241,10 @@ describe("src/index.ts E2E (HOME isolado em /tmp)", () => {
       expect(String(result.todayLogContent)).toContain("Fato E2E DEF-05 gravado no log do dia corrente");
       expect(result.eventHookRemoved).toBe(true);
       expect(result.disposeSuccess).toBe(true);
-      expect(result.dbClosedAfterDispose).toBe(true);
+      // TICKET-DREAMS-04 (Frente 4C) SUPERSEDE o antigo "recall falha após
+      // dispose": o singleton é zerado e o acesso seguinte reabre transparente.
+      expect(result.dbReopenedAfterDispose).toBe(true);
+      expect(result.recallAfterDisposeHasFact).toBe(true);
     } finally {
       fs.rmSync(tmpHome, { recursive: true, force: true });
     }
@@ -509,7 +512,7 @@ Essas foram as memórias extraídas.
 describe("mimo_synthesizer — Cascata de Modelos, Teto de Diálogo e Resiliência Fail-Fast", () => {
   test("Constantes de modelo padrão respeitam a governança do ecossistema", () => {
     expect(DEFAULT_MIMO_MODEL).toBe("opencode/mimo-v2.6-flash-free");
-    expect(DEFAULT_FALLBACK_MODEL).toBe("google/antigravity-gemini-3.7-flash");
+    expect(DEFAULT_FALLBACK_MODEL).toBe("google/antigravity-gemini-3.8-flash");
   });
 
   test("synthesizeMemories em modo DREAMS_OFFLINE=1 lança erro explícito sem inventar dados fakes", async () => {
@@ -548,6 +551,80 @@ describe("mimo_synthesizer — Cascata de Modelos, Teto de Diálogo e Resiliênc
     await expect(synth.synthesize(hugeDialogue)).rejects.toThrow(
       "Nenhum modelo de IA disponível para síntese cognitiva"
     );
+  });
+
+  test("Transport recorder real: --pure em argv e prompt por STDIN, nunca em argv (sem mocks, sem rede)", async () => {
+    // Seam legítimo de I/O: um binário REAL em /tmp grava o próprio argv em disco
+    // e devolve um JSON de memórias válido. Nenhum mock/stub de módulo é usado.
+    const recorderDir = fs.mkdtempSync(path.join("/tmp", "dreams_argv_recorder_"));
+    const argsFile = path.join(recorderDir, "argv.log");
+    const stdinFile = path.join(recorderDir, "stdin.log");
+    const recorderBin = path.join(recorderDir, "opencode_recorder.sh");
+    fs.writeFileSync(
+      recorderBin,
+      [
+        "#!/usr/bin/env bash",
+        // NUL como delimitador: o prompt é multi-linha e não pode ser quebrado por \\n.
+        `printf '%s\\0' "$@" > "${argsFile}"`,
+        // TICKET-DREAMS-01A: o prompt trafega por STDIN, não por argv.
+        `cat > "${stdinFile}"`,
+        `printf '%s\\n' '[{"scope":"collective","fact":"Transport recorder real capturou o argv do comando run","category":"learning"}]'`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+
+    // O recorder é 100% local: desliga o fail-fast offline só durante o spawn
+    // (rede nunca é tocada — o binário apontado é o script gravado acima).
+    const prevOffline = process.env.DREAMS_OFFLINE;
+    delete process.env.DREAMS_OFFLINE;
+    try {
+      const synth = new MimoSynthesizer({
+        binary: recorderBin,
+        models: ["opencode/mimo-v2.6-flash-free"],
+        timeoutMs: 10_000,
+      });
+      const result = await synth.synthesize(
+        "user: use sempre a cota gratuita\nassistant: combinado"
+      );
+
+      // Contrato de saída: JSON real parseado e persistível.
+      expect(result.error).toBeNull();
+      expect(result.modelUsed).toBe("opencode/mimo-v2.6-flash-free");
+      expect(result.source).toBe("mimo");
+      expect(result.memories.length).toBe(1);
+      expect(result.memories[0].scope).toBe("collective");
+      expect(result.memories[0].category).toBe("learning");
+      expect(result.memories[0].fact).toContain("Transport recorder real");
+
+      // Contrato de entrada: argv SEM o prompt + --pure compulsória (TICKET-DREAMS-01A).
+      const argv = fs
+        .readFileSync(argsFile, "utf8")
+        .split("\0")
+        .filter(Boolean);
+      expect(argv).toEqual([
+        "run",
+        "--pure",
+        "--title",
+        "Dreams Synthesis",
+        "--dir",
+        "/tmp",
+        "--model",
+        "opencode/mimo-v2.6-flash-free",
+      ]);
+      // NENHUM item de argv carrega o prompt (anti-E2BIG / anti-exposição em /proc).
+      expect(argv.some((a) => a.includes("<dialogo>"))).toBe(false);
+
+      // O prompt real chegou por STDIN íntegro.
+      const stdin = fs.readFileSync(stdinFile, "utf8");
+      expect(stdin).toContain("<dialogo>");
+      expect(stdin).toContain("REGRAS ABSOLUTAS:");
+      expect(stdin).toContain("user: use sempre a cota gratuita");
+    } finally {
+      if (prevOffline === undefined) delete process.env.DREAMS_OFFLINE;
+      else process.env.DREAMS_OFFLINE = prevOffline;
+      fs.rmSync(recorderDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -705,8 +782,8 @@ describe("DreamsDB — Resiliência de busca FTS5, triggers e contadores", () =>
   });
 });
 
-describe("Síntese Real de Ponta a Ponta via IA (Fallback Gemini 3.7 Flash Antigravity)", () => {
-  test("Gera memórias válidas com modelo real google/antigravity-gemini-3.7-flash e persiste no DreamsDB", async () => {
+describe("Síntese Real de Ponta a Ponta via IA (Fallback Gemini 3.8 Flash Antigravity)", () => {
+  test("Gera memórias válidas com modelo real google/antigravity-gemini-3.8-flash e persiste no DreamsDB", async () => {
     if (process.env.DREAMS_OFFLINE === "1") {
       console.log("[E2E Real] Pulando chamada de rede com DREAMS_OFFLINE=1");
       return;
@@ -723,13 +800,13 @@ describe("Síntese Real de Ponta a Ponta via IA (Fallback Gemini 3.7 Flash Antig
       ].join("\n");
 
       const result = await synthesizeMemories(dialogue, {
-        models: ["google/antigravity-gemini-3.7-flash"],
+        models: ["google/antigravity-gemini-3.8-flash"],
         timeoutMs: 45000,
       });
 
       expect(result.memories.length).toBeGreaterThan(0);
       expect(result.source).toBe("gemini");
-      expect(result.modelUsed).toBe("google/antigravity-gemini-3.7-flash");
+      expect(result.modelUsed).toBe("google/antigravity-gemini-3.8-flash");
       expect(result.error).toBeNull();
 
       for (const mem of result.memories) {
@@ -749,4 +826,343 @@ describe("Síntese Real de Ponta a Ponta via IA (Fallback Gemini 3.7 Flash Antig
       fs.rmSync(testDir, { recursive: true, force: true });
     }
   }, 60000);
+});
+
+// ===========================================================================
+// TICKET-DREAMS-03 (Frentes A + B) — Suíte determinística do SDET (Hugo).
+//
+// Sem mocks: exercita SQLite REAL (bun:sqlite) em arquivos isolados sob /tmp,
+// o tokenizer FTS5 real, o sanitizador real e o SleepCycle real. A suíte é
+// sensível a mutação: cada assert fica vermelho se a produção for revertida
+// (ver comentários "MUTATION").
+// ===========================================================================
+
+describe("TICKET-DREAMS-03A — Robustez FTS5, folding de acentos e dual-write", () => {
+  const dir = fs.mkdtempSync(path.join("/tmp", "opencode_dreams_03a_"));
+  const dbPath = path.join(dir, "fts.db");
+  let db: DreamsDB;
+  let raw: Database;
+
+  beforeAll(() => {
+    db = new DreamsDB(dbPath);
+    raw = new Database(dbPath);
+    raw.exec("PRAGMA busy_timeout = 5000;");
+  });
+
+  afterAll(() => {
+    try { db.close(); } catch { /* noop */ }
+    try { raw.close(); } catch { /* noop */ }
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  test("DDL de memories_fts usa unicode61 remove_diacritics 2", () => {
+    const row = raw.query<{ sql: string }, []>(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'"
+    ).get();
+    expect(row).not.toBeNull();
+    // MUTATION: reverter o tokenizer para o default (sem remove_diacritics) quebra aqui.
+    expect(row!.sql).toContain("unicode61");
+    expect(row!.sql).toContain("remove_diacritics 2");
+  });
+
+  test("folding de acentos: 'inferencia' e 'inferência' casam o MESMO registro", () => {
+    const id = db.insertMemory(
+      "collective",
+      "A inferência local do Laya usa RLCD sem acento no indice",
+      "learning"
+    );
+
+    const semAcento = db.recall("inferencia");
+    const comAcento = db.recall("inferência");
+
+    expect(semAcento.length).toBe(1);
+    expect(comAcento.length).toBe(1);
+    expect(semAcento[0].id).toBe(id);
+    expect(comAcento[0].id).toBe(id);
+    expect(semAcento[0].fact).toBe(comAcento[0].fact);
+  });
+
+  test("sanitizeFts5Query neutraliza ':' '-' '*' '(' '/' '&' e aspas", () => {
+    expect(sanitizeFts5Query("agent:dante")).toBe('"agent" "dante"');
+    expect(sanitizeFts5Query("ensemble-room")).toBe('"ensemble" "room"');
+    expect(sanitizeFts5Query("(c/d) * &")).toBe('"c" "d"');
+    expect(sanitizeFts5Query('Laya "RLCD"')).toBe('"Laya" "RLCD"');
+    expect(sanitizeFts5Query("***")).toBe("");
+    expect(sanitizeFts5Query("")).toBe("");
+    expect(sanitizeFts5Query("!!! ... ---")).toBe("");
+  });
+
+  test("recall com ':' (agent:dante) e '-' (ensemble-room) NÃO lança e acha o fato", () => {
+    db.insertMemory("agent:dante", "Escopo agent:dante orquestra o ensemble room", "decision");
+
+    let viaColon: any[] = [];
+    expect(() => { viaColon = db.recall("agent:dante"); }).not.toThrow();
+    expect(viaColon.length).toBe(1);
+    expect(viaColon[0].fact).toContain("agent:dante");
+
+    let viaHifen: any[] = [];
+    expect(() => { viaHifen = db.recall("ensemble-room"); }).not.toThrow();
+    expect(viaHifen.length).toBe(1);
+    expect(viaHifen[0].fact).toContain("ensemble room");
+  });
+
+  test("MATCH CRU com 'agent:dante' lança fts5 syntax error — prova que o sanitizador é necessário", () => {
+    // Sem o sanitizador, ':' é interpretado como filtro de coluna inexistente.
+    // Este canário garante que o teste acima exercita um caminho real de risco.
+    expect(() =>
+      raw.query("SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?").all("agent:dante")
+    ).toThrow();
+  });
+
+  test("touchRecall incrementa recall_count e atualiza last_reinforced", () => {
+    const id = db.insertMemory("agent:clara", "Clara roda a suite deterministica real", "learning");
+    const before = db.getMemoriesByScope("agent:clara", 10).find((m) => m.id === id)!;
+    expect(before.recall_count).toBe(0);
+
+    const recalled = db.recall("deterministica", "agent:clara");
+    expect(recalled.length).toBe(1);
+
+    const after = db.getMemoriesByScope("agent:clara", 10).find((m) => m.id === id)!;
+    expect(after.recall_count).toBe(1);
+    expect(new Date(after.last_reinforced).getTime()).toBeGreaterThanOrEqual(
+      new Date(before.last_reinforced).getTime()
+    );
+  });
+
+  test("migração idempotente de DB legado: reescreve DDL, preserva linhas e habilita folding", () => {
+    const migDir = path.join(dir, "mig");
+    fs.mkdirSync(migDir, { recursive: true });
+    const migPath = path.join(migDir, "legacy.db");
+
+    // DB legado: memories_fts SEM remove_diacritics, já populado.
+    const legacy = new Database(migPath);
+    legacy.exec(`
+      CREATE TABLE memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL, fact TEXT NOT NULL, category TEXT NOT NULL,
+        score REAL DEFAULT 1.0, decay_weight REAL DEFAULT 1.0,
+        recall_count INTEGER DEFAULT 0, confirmations INTEGER DEFAULT 1,
+        last_reinforced TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE VIRTUAL TABLE memories_fts USING fts5(
+        fact, category, content='memories', content_rowid='id'
+      );
+      INSERT INTO memories (scope, fact, category, score, decay_weight, recall_count, confirmations, last_reinforced, created_at)
+        VALUES ('collective', 'Memória legada sobre inferência antiga', 'learning', 1.0, 1.0, 0, 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+      INSERT INTO memories_fts(rowid, fact, category)
+        VALUES (1, 'Memória legada sobre inferência antiga', 'learning');
+    `);
+    legacy.close();
+
+    const readSql = () => {
+      const probe = new Database(migPath);
+      const sql = probe.query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'"
+      ).get()!.sql;
+      probe.close();
+      return sql;
+    };
+
+    // 1ª abertura: deve detectar o tokenizer legado, recriar e 'rebuild'.
+    const migrated = new DreamsDB(migPath);
+    const sqlAfterMigration = readSql();
+    expect(sqlAfterMigration).toContain("remove_diacritics 2");
+    expect(migrated.getAllMemories().length).toBe(1);            // nenhuma linha perdida
+    expect(migrated.recall("inferencia").length).toBe(1);        // índice reconstruído + folding
+    migrated.close();
+
+    // 2ª abertura: idempotente — DDL inalterado e dados preservados.
+    const second = new DreamsDB(migPath);
+    const sqlAfterSecond = readSql();
+    expect(sqlAfterSecond).toBe(sqlAfterMigration);
+    expect(second.getAllMemories().length).toBe(1);
+    expect(second.recall("inferência").length).toBe(1);
+    second.close();
+  });
+});
+
+describe("TICKET-DREAMS-03A — Dual-write dream_learn -> dream_recall no MESMO turno", () => {
+  const dir = fs.mkdtempSync(path.join("/tmp", "opencode_dreams_dw_"));
+  let db: DreamsDB;
+
+  beforeAll(() => { db = new DreamsDB(path.join(dir, "dw.db")); });
+  afterAll(() => {
+    try { db.close(); } catch { /* noop */ }
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  test("dream_learn grava JSONL E torna o fato consultável no mesmo turno (db injetado)", () => {
+    const dailyDir = path.join(dir, "daily");
+    const ret = dream_learn(
+      { scope: "collective", fact: "Maiteux prefere determinismo nos testes", category: "preference" },
+      { dailyDir, db }
+    );
+    expect(typeof ret).toBe("string");
+
+    // Camada 1: JSONL diário (fonte de verdade) — exatamente 1 linha com o fato.
+    const logFile = fs.readdirSync(dailyDir).find((f) => f.startsWith("log_"))!;
+    const lines = fs.readFileSync(path.join(dailyDir, logFile), "utf-8").trim().split("\n");
+    expect(lines.length).toBe(1);
+    const parsed = JSON.parse(lines[0]);
+    expect(parsed.fact).toBe("Maiteux prefere determinismo nos testes");
+    expect(parsed.scope).toBe("collective");
+
+    // Camada 2: dual-write síncrono no SQLite — recall imediato, sem ciclo de sono.
+    const recalled = db.recall("determinismo");
+    expect(recalled.length).toBe(1);
+    expect(recalled[0].fact).toContain("determinismo");
+
+    // dream_recall (tool) também devolve o registro na mesma sessão.
+    const toolOut = dream_recall({ query: "determinismo" }, db);
+    expect(toolOut).toContain("determinismo");
+  });
+
+  test("dream_learn sem db é retrocompatível: grava apenas o JSONL", () => {
+    const dailyDir = path.join(dir, "daily_retro");
+    expect(() =>
+      dream_learn(
+        { scope: "agent:tales", fact: "Aprendizado apenas JSONL sem banco", category: "learning" },
+        { dailyDir }
+      )
+    ).not.toThrow();
+    const logFile = fs.readdirSync(dailyDir).find((f) => f.startsWith("log_"))!;
+    const parsed = JSON.parse(fs.readFileSync(path.join(dailyDir, logFile), "utf-8").trim());
+    expect(parsed.fact).toBe("Aprendizado apenas JSONL sem banco");
+  });
+
+  test("scope inválido continua lançando (anti Directory Traversal)", () => {
+    const dailyDir = path.join(dir, "daily_bad");
+    expect(() =>
+      dream_learn({ scope: "../escape", fact: "x", category: "learning" }, { dailyDir, db })
+    ).toThrow();
+  });
+
+  test("falha REAL do espelho SQLite (db fechado) não quebra a tool: JSONL é preservado", () => {
+    const failDir = path.join(dir, "daily_fail");
+    const closed = new DreamsDB(path.join(dir, "closed.db"));
+    closed.close(); // componente real em estado de erro: insertMemory lançará
+
+    // MUTATION: sem o try/catch do dual-write, esta chamada lançaria.
+    expect(() =>
+      dream_learn(
+        { scope: "collective", fact: "Fato resiliente com banco indisponivel", category: "pitfall" },
+        { dailyDir: failDir, db: closed }
+      )
+    ).not.toThrow();
+
+    const logFile = fs.readdirSync(failDir).find((f) => f.startsWith("log_"))!;
+    const parsed = JSON.parse(fs.readFileSync(path.join(failDir, logFile), "utf-8").trim());
+    expect(parsed.fact).toBe("Fato resiliente com banco indisponivel");
+  });
+});
+
+describe("TICKET-DREAMS-03B — Pesos categóricos, ranking semântico e amortecimento log", () => {
+  const dir = fs.mkdtempSync(path.join("/tmp", "opencode_dreams_03b_"));
+  const dbPath = path.join(dir, "rank.db");
+  let db: DreamsDB;
+  let cycle: SleepCycle;
+  let raw: Database;
+
+  beforeAll(() => {
+    db = new DreamsDB(dbPath);
+    raw = new Database(dbPath);
+    raw.exec("PRAGMA busy_timeout = 5000;");
+    cycle = new SleepCycle(db, { baseDir: dir, sessionDbPath: path.join(dir, "none.db") });
+  });
+
+  afterAll(() => {
+    try { db.close(); } catch { /* noop */ }
+    try { raw.close(); } catch { /* noop */ }
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  test("CATEGORY_WEIGHTS expõe os pesos canônicos e insertMemory usa defaults por categoria", () => {
+    expect(CATEGORY_WEIGHTS.preference).toEqual({ base_weight: 2.5, decay_weight: 0.1 });
+    expect(CATEGORY_WEIGHTS.decision).toEqual({ base_weight: 2.0, decay_weight: 0.3 });
+    expect(CATEGORY_WEIGHTS.pitfall).toEqual({ base_weight: 1.8, decay_weight: 0.5 });
+    expect(CATEGORY_WEIGHTS.learning).toEqual({ base_weight: 1.0, decay_weight: 1.0 });
+
+    db.insertMemory("agent:pesos", "Preferência sem score explícito", "preference");
+    db.insertMemory("agent:pesos", "Aprendizado sem score explícito", "learning");
+    const rows = db.getMemoriesByScope("agent:pesos", 10);
+    const pref = rows.find((m) => m.fact.includes("Preferência sem score"))!;
+    const learn = rows.find((m) => m.fact.includes("Aprendizado sem score"))!;
+    // MUTATION: defaults revertidos (1.0) quebram estes asserts.
+    expect(pref.score).toBe(2.5);
+    expect(pref.decay_weight).toBe(0.1);
+    expect(learn.score).toBe(1.0);
+    expect(learn.decay_weight).toBe(1.0);
+  });
+
+  test("Ranking: preference ANTIGA supera learning RECENTE no Top 20 após deepSleep", async () => {
+    const oldPref = db.insertMemory(
+      "collective",
+      "Preferência antiga: sempre usar suites deterministicas",
+      "preference"
+    );
+    const newLearn = db.insertMemory(
+      "collective",
+      "Aprendizado recente: descobri o comando bun test",
+      "learning"
+    );
+
+    const oldIso = new Date(Date.now() - 90 * 86400000).toISOString();
+    const nowIso = new Date().toISOString();
+    raw.run("UPDATE memories SET last_reinforced = ?, created_at = ? WHERE id = ?", [oldIso, oldIso, oldPref]);
+    raw.run("UPDATE memories SET last_reinforced = ?, created_at = ? WHERE id = ?", [nowIso, nowIso, newLearn]);
+
+    await cycle.deepSleep();
+
+    const top = db.getMemoriesByScope("collective", 20);
+    const prefIdx = top.findIndex((m) => m.id === oldPref);
+    const learnIdx = top.findIndex((m) => m.id === newLearn);
+    expect(prefIdx).toBeGreaterThanOrEqual(0);
+    expect(learnIdx).toBeGreaterThanOrEqual(0);
+    // MUTATION: sem o viés de categoria (base 2.5 / decay 0.1), a learning recente venceria.
+    expect(prefIdx).toBeLessThan(learnIdx);
+    expect(top[prefIdx].score).toBeGreaterThan(top[learnIdx].score);
+
+    // A projeção do Top 20 reflete a mesma ordem.
+    cycle.updateProjections();
+    const md = fs.readFileSync(path.join(dir, "collective", "COLLECTIVE_MEMORY.md"), "utf-8");
+    const posPref = md.indexOf("Preferência antiga");
+    const posLearn = md.indexOf("Aprendizado recente");
+    expect(posPref).toBeGreaterThan(-1);
+    expect(posLearn).toBeGreaterThan(-1);
+    expect(posPref).toBeLessThan(posLearn);
+  });
+
+  test("Amortecimento de recall: 100 lembranças crescem log(101), não linearmente", async () => {
+    const hot = db.insertMemory("agent:damping", "Fato canário repetido", "learning");
+    const cold = db.insertMemory("agent:damping", "Fato controle estavel", "learning");
+
+    const iso = new Date().toISOString();
+    for (const id of [hot, cold]) {
+      raw.run("UPDATE memories SET last_reinforced = ?, created_at = ?, recall_count = 0 WHERE id = ?", [iso, iso, id]);
+    }
+
+    const N = 100;
+    for (let i = 0; i < N; i++) {
+      const r = db.recall("canário", "agent:damping");
+      expect(r.length).toBe(1);
+    }
+
+    const hotMid = db.getMemoriesByScope("agent:damping", 10).find((m) => m.id === hot)!;
+    const coldMid = db.getMemoriesByScope("agent:damping", 10).find((m) => m.id === cold)!;
+    expect(hotMid.recall_count).toBe(N);
+    expect(coldMid.recall_count).toBe(0);
+
+    await cycle.deepSleep();
+
+    const hotAfter = db.getAllMemories().find((m) => m.id === hot)!;
+    const coldAfter = db.getAllMemories().find((m) => m.id === cold)!;
+    const delta = hotAfter.score - coldAfter.score;
+
+    // log(1 + 100) = 4.605...  MUTATION: count linear daria delta = 100;
+    // ausência de amortecimento/log daria delta = 0. A banda [4.0, 5.0] prova
+    // o teto sublinear logarítmico.
+    expect(delta).toBeGreaterThan(4.0);
+    expect(delta).toBeLessThan(5.0);
+    expect(delta).toBeLessThan(N); // nunca linear
+  });
 });

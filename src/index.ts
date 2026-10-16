@@ -5,11 +5,60 @@ import { DreamsDB } from "./core/db";
 import { wrapSystemPromptInjection } from "./core/prompt_injector";
 import { dream_learn, dream_recall } from "./tools";
 
-const db = new DreamsDB();
-
 // Raiz das memórias Dreams (~/.config/opencode/dreams):
 //   collective/COLLECTIVE_MEMORY.md + personas/<agent>.md
 const DREAMS_DIR = path.join(os.homedir(), ".config", "opencode", "dreams");
+
+// TICKET-DREAMS-04 (Frente 4C) — LAZY INIT / SINGLETON.
+//
+// A conexão SQLite NÃO é aberta na importação do módulo (o antigo
+// `const db = new DreamsDB()` rodava abrir/DDL/WAL no top-level, gerando
+// efeito colateral prematuro ao carregar o plugin). A instância nasce apenas
+// no primeiro uso real (tool call), via `getDB()`.
+//
+// Ciclo de vida de descarte: `dispose()` chama `closeDB()`, que fecha a
+// conexão E zera o singleton. Se o plugin for recarregado no MESMO processo,
+// o próximo `getDB()` reabre o banco de forma transparente — nunca se
+// devolve uma referência a uma conexão já fechada ("database is closed").
+let dbInstance: DreamsDB | null = null;
+
+/**
+ * Retorna a conexão única com o `DreamsDB`, abrindo-a sob demanda.
+ *
+ * @param dbPath Caminho opcional do banco (usado apenas na 1ª abertura e por
+ *               testes determinísticos isolados; produção usa o default).
+ */
+export function getDB(dbPath?: string): DreamsDB {
+  if (!dbInstance) {
+    dbInstance = new DreamsDB(dbPath);
+  }
+  return dbInstance;
+}
+
+/**
+ * Fecha a conexão (se aberta) e zera o singleton; a próxima chamada a
+ * `getDB()` reabre o banco. Idempotente e fail-soft (nunca lança).
+ */
+export function closeDB(): void {
+  const current = dbInstance;
+  // Zera ANTES de fechar: mesmo que `close()` lance, o singleton não fica
+  // apontando para uma conexão morta e o próximo `getDB()` reabre limpo.
+  dbInstance = null;
+  if (!current) return;
+  try {
+    current.close();
+  } catch (e) {
+    console.error("[Dreams] Failed to close DB on dispose:", e);
+  }
+}
+
+/**
+ * Introspecção determinística do estado do singleton (sem mocks):
+ * `true` apenas enquanto há uma conexão viva aberta por `getDB()`.
+ */
+export function isDBInitialized(): boolean {
+  return dbInstance !== null;
+}
 
 // Hook de eventos LIMPO: a telemetria trivial de ciclo de vida
 // ("Sessão finalizada no diretório...", "Sessão compactada...",
@@ -29,7 +78,21 @@ export const serverPlugin: Plugin = async (input) => {
           category: tool.schema.enum(["learning", "decision", "pitfall", "preference"]).describe("Category of memory"),
         },
         async execute(args) {
-          return dream_learn(args as { scope: string; fact: string; category: "learning" | "decision" | "pitfall" | "preference" });
+          // Frente A (TICKET-DREAMS-03): injeta o DreamsDB para o dual-write
+          // síncrono — o fato fica consultável por dream_recall no mesmo turno.
+          // Frente 4C: a conexão é obtida LAZY dentro do execute (nunca no
+          // topo do módulo) e o JSONL diário segue como fonte de verdade mesmo
+          // se o SQLite estiver indisponível (fail-soft).
+          let database: DreamsDB | undefined;
+          try {
+            database = getDB();
+          } catch (e) {
+            console.error("[Dreams] dream_learn: SQLite indisponível (JSONL preservado):", e);
+          }
+          return dream_learn(
+            args as { scope: string; fact: string; category: "learning" | "decision" | "pitfall" | "preference" },
+            { db: database }
+          );
         },
       }),
 
@@ -41,7 +104,8 @@ export const serverPlugin: Plugin = async (input) => {
           category: tool.schema.string().optional().describe("Category filter"),
         },
         async execute(args) {
-          return dream_recall(args, db);
+          // Frente 4C: conexão aberta sob demanda no primeiro recall real.
+          return dream_recall(args, getDB());
         },
       }),
     },
@@ -69,11 +133,9 @@ export const serverPlugin: Plugin = async (input) => {
 
     dispose: async () => {
       // DEF-09: libera a conexão SQLite (WAL) no unload do plugin.
-      try {
-        db.close();
-      } catch (e) {
-        console.error("[Dreams] Failed to close DB on dispose:", e);
-      }
+      // Frente 4C: `closeDB()` fecha E zera o singleton — um reload no mesmo
+      // processo reabre o banco via `getDB()` sem erro de conexão fechada.
+      closeDB();
     }
   };
 };

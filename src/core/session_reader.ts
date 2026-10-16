@@ -13,6 +13,12 @@
  *  - Ruído descartado: `type: "tool"` (payloads binários / saídas de bash
  *    gigantescas), `step-start`, `step-finish`, `patch`, `file`, `compaction`.
  *
+ * Defesa anti-recursão: sessões internas de síntese do Dreams (título padrão
+ * `"Dreams Synthesis"`) são excluídas em duas camadas — filtro SQL via
+ * `session.data.title` e revalidação em JS no momento da emissão — de modo que
+ * a síntese de um dia nunca seja reprocessada como diálogo de usuário no dia
+ * seguinte. A lista é configurável por `excludeSessionTitles`.
+ *
  * NUNCA lança exceção não tratada: banco inexistente, vazio, corrompido ou
  * indisponível retornam `[]` (fail-soft; o erro é apenas repassado ao
  * callback opcional `onError`, nunca propagado).
@@ -27,6 +33,14 @@ export type DialogRole = "user" | "assistant" | "system" | "other";
 
 /** Natureza textual do trecho extraído. */
 export type DialogKind = "text" | "reasoning";
+
+/**
+ * Títulos de sessão internos do Dreams que NUNCA devem ser lidos como diálogo
+ * de usuário (defesa anti-recursão: a síntese de um dia não pode virar
+ * matéria-prima do dia seguinte). Comparação exata contra
+ * `json_extract(session.data, '$.title')`.
+ */
+export const DEFAULT_EXCLUDED_SESSION_TITLES: readonly string[] = ["Dreams Synthesis"];
 
 /** Um trecho do diálogo, já normalizado e agrupado por mensagem. */
 export interface DialogEntry {
@@ -67,6 +81,13 @@ export interface SessionReaderOptions {
   /** Corte de caracteres por trecho; `0` ou `Infinity` desliga. Padrão: 4000. */
   maxTextLength?: number;
   /**
+   * Títulos de sessão a excluir da leitura (comparação exata contra
+   * `session.data.title`). Padrão: `["Dreams Synthesis"]`. Passe `[]` para
+   * desligar a exclusão. Quando a tabela `session` não existe (schema
+   * divergente), a exclusão degrada silenciosamente para vazio.
+   */
+  excludeSessionTitles?: readonly string[];
+  /**
    * Observabilidade opcional: recebe qualquer erro engolido pelo fail-soft.
    * A função NUNCA lança — quem decide se o erro vira log é o chamador.
    */
@@ -82,6 +103,44 @@ export function defaultSessionDbPath(): string {
 function normalizeRole(raw: unknown): DialogRole {
   if (raw === "user" || raw === "assistant" || raw === "system") return raw;
   return "other";
+}
+
+/**
+ * Coleta os IDs de sessões cujo título bate com `titles`.
+ *
+ * Defesa em profundidade (camada 1 — SQL): resolve as sessões internas do
+ * Dreams uma única vez, fora da query quente, consultando a tabela `session`.
+ * É deliberadamente fail-soft: se a tabela não existir (schemas antigos,
+ * fixtures de teste) ou `session.data` não for JSON válido, retorna `[]` em vez
+ * de derrubar a leitura. Nunca interpola valores no SQL — usa placeholders.
+ */
+function collectExcludedSessionIds(db: Database, titles: readonly string[]): string[] {
+  if (titles.length === 0) return [];
+  try {
+    const tableExists = db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session'`
+      )
+      .get();
+    if (!tableExists) return [];
+
+    const placeholders = titles.map(() => "?").join(",");
+    const rows = db
+      .query<{ id: string | null }, any[]>(
+        `SELECT s.id AS id
+           FROM session s
+          WHERE json_valid(s.data)
+            AND json_extract(s.data, '$.title') IN (${placeholders})`
+      )
+      .all(...titles);
+
+    return rows
+      .map((row) => row.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+  } catch {
+    // Tabela ausente, schema divergente ou JSON malformado → sem exclusões.
+    return [];
+  }
 }
 
 /** Trunca o texto em `max` caracteres, sinalizando o corte. */
@@ -106,6 +165,7 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
   const limit = Math.max(1, options.limit ?? 500);
   const includeReasoning = options.includeReasoning ?? true;
   const maxTextLength = options.maxTextLength ?? 4000;
+  const excludeSessionTitles = options.excludeSessionTitles ?? DEFAULT_EXCLUDED_SESSION_TITLES;
 
   // Fail-soft: arquivo ausente ou vazio → lista vazia, sem exceção.
   try {
@@ -120,6 +180,17 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
   try {
     db = new Database(dbPath, { readonly: true });
 
+    // 0) Defesa anti-recursão (camada 1 — SQL): resolve os IDs das sessões
+    //    internas do Dreams ("Dreams Synthesis") ANTES da query quente, para
+    //    que o LIMIT já incida sobre o conjunto filtrado. Fail-soft: tabela
+    //    ausente → lista vazia, sem afetar a leitura normal.
+    const excludedSessionIds = collectExcludedSessionIds(db, excludeSessionTitles);
+    const excludedSessionIdSet = new Set(excludedSessionIds);
+    const exclusionClause =
+      excludedSessionIds.length > 0
+        ? `AND m.session_id NOT IN (${excludedSessionIds.map(() => "?").join(",")})`
+        : "";
+
     // 1) Mensagens da janela. Busca em ordem DECRESCENTE + LIMIT para reter as
     //    mais RECENTES quando a janela excede o limite, depois inverte para
     //    devolver a lista em ordem cronológica de leitura.
@@ -131,16 +202,17 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
           time_created: number;
           role_raw: unknown;
         },
-        [number, number, number]
+        (string | number)[]
       >(
         `SELECT m.id, m.session_id, m.time_created,
                 json_extract(m.data, '$.role') AS role_raw
            FROM message m
           WHERE m.time_created >= ? AND m.time_created <= ?
+                ${exclusionClause}
           ORDER BY m.time_created DESC, m.id DESC
           LIMIT ?`
       )
-      .all(since, until, limit);
+      .all(since, until, ...excludedSessionIds, limit);
     messages.reverse();
 
     if (messages.length === 0) return [];
@@ -199,6 +271,11 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
     //    (ex.: mensagens compostas apenas por ferramentas/parts de ruído).
     const entries: DialogEntry[] = [];
     for (const msg of messages) {
+      // Defesa em profundidade (camada 2 — JS): revalida o Set de sessões
+      // internas no momento da emissão. Mesmo que a cláusula SQL seja
+      // futuramente alterada/omitida, nada interno escapa para o resumo.
+      if (excludedSessionIdSet.has(msg.session_id)) continue;
+
       const bucket = partsByMessage.get(msg.id);
       if (!bucket) continue;
 

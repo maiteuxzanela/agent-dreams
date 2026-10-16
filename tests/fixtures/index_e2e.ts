@@ -2,7 +2,8 @@
 // apontando para um diretório temporário isolado, provando em runtime:
 //   - DEF-05: o path do log diário é derivado da data no momento da escrita
 //     (sem constantes estáticas dateStr/logFile congeladas na importação);
-//   - DEF-09: dispose() chama db.close() — a conexão SQLite fica inutilizável;
+//   - DEF-09 + Frente 4C: dispose() fecha e ZERA o singleton; o próximo
+//     acesso reabre o SQLite de forma transparente (sem "database is closed");
 //   - Hook de telemetria trivial REMOVIDO: session.idle não gera mais log.
 import { serverPlugin } from "../../src/index";
 import fs from "fs";
@@ -35,14 +36,20 @@ result.todayLogExists = fs.existsSync(todayLog);
 result.todayLogName = path.basename(todayLog);
 result.todayLogContent = fs.existsSync(todayLog) ? fs.readFileSync(todayLog, "utf-8") : "";
 
-// DEF-09: dispose fecha o banco — recall seguinte deve falhar
+// DEF-09 + TICKET-DREAMS-04 (Frente 4C): dispose() fecha E ZERA o singleton.
+// Contrato SUPERSEDE o antigo "recall falha após dispose": o próximo acesso
+// reabre o banco de forma transparente (nunca "database is closed") e os dados
+// persistidos seguem legíveis.
 await plugin.dispose();
 result.disposeSuccess = true;
 try {
-  await plugin.tool.dream_recall.execute({ query: "qualquer" });
-  result.dbClosedAfterDispose = false;
+  const recall = await plugin.tool.dream_recall.execute({ query: "Fato E2E DEF-05 gravado" });
+  result.dbReopenedAfterDispose = true;
+  result.recallAfterDisposeHasFact =
+    typeof recall === "string" && recall.includes("Fato E2E DEF-05 gravado no log do dia corrente");
 } catch (e) {
-  result.dbClosedAfterDispose = true;
+  result.dbReopenedAfterDispose = false;
+  result.recallAfterDisposeHasFact = false;
 }
 
 console.log("E2E_RESULT:" + JSON.stringify(result));

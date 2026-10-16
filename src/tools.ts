@@ -11,18 +11,22 @@ const DAILY_DIR = path.join(DREAMS_DIR, "daily");
 const SCOPE_PATTERN = /^(collective|agent:[a-zA-Z0-9_-]+)$/;
 
 /**
- * We don't interact with the DB directly in `dream_learn` during the active session 
- * to avoid blocking locks. Instead, we write to a daily JSONL for the Light Sleep ingestion.
- * But actually, using SQLite WAL mode is very fast and concurrent. 
- * The prompt said: "Light Sleep: Ingestão de logs/fatos diários brutos (dreams/daily/*.jsonl)"
- * So dream_learn SHOULD append to JSONL.
+ * `dream_learn` persiste o fato em DUAS camadas:
+ *   1. Append no JSONL diário (dreams/daily/log_<YYYY-MM-DD>.jsonl), fonte de
+ *      verdade durável ingerida pelo Light Sleep — é o caminho histórico.
+ *   2. TICKET-DREAMS-03 (Frente A): dual-write SÍNCRONO no SQLite via
+ *      `db.insertMemory()`, quando um `DreamsDB` é injetado. Isso torna o fato
+ *      imediatamente consultável por `dream_recall` no mesmo turno de vigília,
+ *      sem depender da consolidação noturna. O SQLite roda em WAL mode com
+ *      busy_timeout, tornando o insert rápido e seguro para concorrência.
  *
  * O diretório é criado de forma lazy (sem efeito colateral na importação) e pode ser
- * injetado via `options.dailyDir` para testes isolados em /tmp.
+ * injetado via `options.dailyDir` para testes isolados em /tmp. O `db` é opcional
+ * para preservar o uso sem banco (ex.: testes puramente de JSONL).
  */
 export function dream_learn(
   args: { scope: string, fact: string, category: "learning" | "decision" | "pitfall" | "preference" },
-  options: { dailyDir?: string } = {}
+  options: { dailyDir?: string; db?: DreamsDB } = {}
 ) {
   if (!SCOPE_PATTERN.test(args.scope)) {
     throw new Error(
@@ -45,7 +49,23 @@ export function dream_learn(
     timestamp: new Date().toISOString()
   };
 
+  // Fonte de verdade durável da vigília: o JSONL diário (ingerido no Light Sleep).
   fs.appendFileSync(file, JSON.stringify(record) + "\n");
+
+  // TICKET-DREAMS-03 (Frente A) — DUAL-WRITE SÍNCRONO:
+  // além do JSONL, espelha imediatamente no SQLite para que o fato seja
+  // consultável por `dream_recall` JÁ no mesmo turno de vigília, sem esperar
+  // o ciclo noturno. O JSONL permanece a fonte de verdade: se o espelho no
+  // SQLite falhar (lock transitório, DB indisponível), o fato não é perdido e
+  // a tool não quebra o chat do usuário — apenas registra o desvio.
+  if (options.db) {
+    try {
+      options.db.insertMemory(args.scope, args.fact, args.category);
+    } catch (e) {
+      console.error("[Dreams] dual-write para SQLite falhou:", e);
+    }
+  }
+
   return `Memory logged to daily stream for scope '${args.scope}'. Will be consolidated tonight.`;
 }
 

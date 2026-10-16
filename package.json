@@ -9,7 +9,8 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "bun test"
+    "test": "DREAMS_OFFLINE=1 bun test",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "opencode",
@@ -19,7 +20,9 @@
   ],
   "license": "MIT",
   "devDependencies": {
-    "bun-types": "^1.4.2"
+    "@types/bun": "^1.4.2",
+    "bun-types": "^1.4.2",
+    "typescript": "^5.9.0"
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.18.35",

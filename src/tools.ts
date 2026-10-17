@@ -1,4 +1,5 @@
 import { DreamsDB } from "./core/db";
+import { redactSecrets } from "./core/security";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -34,6 +35,11 @@ export function dream_learn(
     );
   }
 
+  // DEFESA ATIVA (TICKET-DREAMS-06): o fato vindo do LLM/tool-call pode conter
+  // credenciais coladas pelo usuário (OpenAI sk-, Google AIza, Bearer, JWT,
+  // password=...). Mascara ANTES de qualquer persistência (JSONL e dual-write).
+  const sanitizedFact = redactSecrets(args.fact);
+
   const dailyDir = options.dailyDir ?? DAILY_DIR;
   if (!fs.existsSync(dailyDir)) {
     fs.mkdirSync(dailyDir, { recursive: true });
@@ -44,7 +50,7 @@ export function dream_learn(
   
   const record = {
     scope: args.scope,
-    fact: args.fact,
+    fact: sanitizedFact,
     category: args.category,
     timestamp: new Date().toISOString()
   };
@@ -60,7 +66,7 @@ export function dream_learn(
   // a tool não quebra o chat do usuário — apenas registra o desvio.
   if (options.db) {
     try {
-      options.db.insertMemory(args.scope, args.fact, args.category);
+      options.db.insertMemory(args.scope, sanitizedFact, args.category);
     } catch (e) {
       console.error("[Dreams] dual-write para SQLite falhou:", e);
     }

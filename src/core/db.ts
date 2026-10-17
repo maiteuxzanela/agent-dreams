@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { redactSecrets } from "./security";
 import path from "path";
 import os from "os";
 import fs from "fs";
@@ -218,13 +219,19 @@ export class DreamsDB {
     decay_weight: number = CATEGORY_WEIGHTS[category]?.decay_weight ?? 1.0,
     options: { reinforce?: boolean } = {}
   ): number {
+    // DEFESA EM PROFUNDIDADE (TICKET-DREAMS-06): mesmo que o chamador
+    // (tool `dream_learn`, remSleep, etc.) já tenha redigido, o seam de
+    // persistência reaplica `redactSecrets` de forma idempotente. Garante que
+    // NENHUM credencial (sk-, AIza, Bearer, JWT, password=...) alcance o
+    // SQLite, independentemente do caminho de chamada.
+    const sanitizedFact = redactSecrets(fact);
     const now = new Date().toISOString();
     const shouldReinforce = options.reinforce !== false;
 
     // 1. Duplicata EXATA no mesmo escopo (comportamento histórico).
     const existing = this.db.query<MemoryRecord, [string, string]>(
       "SELECT * FROM memories WHERE scope = ? AND fact = ?"
-    ).get(scope, fact);
+    ).get(scope, sanitizedFact);
 
     if (existing && existing.id) {
       // DEF-10: reforço opcional e SEMPRE limitado. `reinforce: false`
@@ -234,19 +241,19 @@ export class DreamsDB {
       }
       // Promoção: o mesmo fato já no coletivo torna a cópia de persona obsoleta.
       if (scope === "collective") {
-        this.removeSimilarPersonas(fact);
+        this.removeSimilarPersonas(sanitizedFact);
       }
       return existing.id;
     }
 
     // 2. Duplicata SEMÂNTICA no mesmo escopo (FTS5 + Jaccard).
-    const semanticSameScope = this.findSimilarMemory(fact, { scope });
+    const semanticSameScope = this.findSimilarMemory(sanitizedFact, { scope });
     if (semanticSameScope && semanticSameScope.id) {
       if (shouldReinforce) {
         this.reinforceMemory(semanticSameScope, now);
       }
       if (scope === "collective") {
-        this.removeSimilarPersonas(fact);
+        this.removeSimilarPersonas(sanitizedFact);
       }
       return semanticSameScope.id;
     }
@@ -254,7 +261,7 @@ export class DreamsDB {
     // 3. Hierarquia cross-scope.
     if (scope === "collective") {
       // 3a. Promoção Persona ➔ Coletivo.
-      const personaMatches = this.findSimilarPersonas(fact);
+      const personaMatches = this.findSimilarPersonas(sanitizedFact);
       const promoted = personaMatches[0];
       if (promoted && typeof promoted.id === "number") {
         const promotedId = promoted.id;
@@ -269,7 +276,7 @@ export class DreamsDB {
       }
     } else if (scope.startsWith("agent:")) {
       // 3b. Herança Coletivo ➔ Persona: reforça o coletivo, não clona.
-      const collectiveEquivalent = this.findSimilarMemory(fact, { scope: "collective" });
+      const collectiveEquivalent = this.findSimilarMemory(sanitizedFact, { scope: "collective" });
       if (collectiveEquivalent && collectiveEquivalent.id) {
         if (shouldReinforce) {
           this.reinforceMemory(collectiveEquivalent, now);
@@ -283,7 +290,7 @@ export class DreamsDB {
       `INSERT INTO memories (scope, fact, category, score, decay_weight, recall_count, confirmations, last_reinforced, created_at)
        VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?)`
     );
-    const result = query.run(scope, fact, category, score, decay_weight, now, now);
+    const result = query.run(scope, sanitizedFact, category, score, decay_weight, now, now);
     return Number(result.lastInsertRowid);
   }
 

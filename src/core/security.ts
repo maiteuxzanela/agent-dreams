@@ -9,9 +9,10 @@
  * Padrões cobertos (ordem de aplicação importa — específicos antes dos genéricos):
  *   - OpenAI:  `sk-[a-zA-Z0-9_-]{20,}`                 → `sk-***REDACTED***`
  *   - Google:  `AIza[0-9A-Za-z_-]{35,}`                → `AIza***REDACTED***`
+ *   - GitHub:  `gh[pousr]_...` / `github_pat_...`      → `gh-***REDACTED***`
  *   - Bearer:  `Bearer\s+[A-Za-z0-9_\-\.]{15,}`        → `Bearer ***REDACTED***`
  *   - JWT:     `eyJ.<base64url>.<base64url>.*`          → `***REDACTED_JWT***`
- *   - Atribuições comuns: `password|secret|api_key|token|...=valor` → `chave=***REDACTED***`
+ *   - Atribuições comuns: `password|secret|api_key|token|github_token|...=valor` → `chave=***REDACTED***`
  *
  * Garantias contratuais:
  *  - NUNCA lança exceção (qualquer entrada não-string devolve `""`).
@@ -63,9 +64,17 @@ const SECRET_RULES: readonly SecretRule[] = [
     replacement: REDACTED_JWT_PLACEHOLDER,
   },
   {
+    name: "github-token",
+    pattern: /\b(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})/g,
+    replacement: `gh-${REDACTED_PLACEHOLDER}`,
+  },
+  {
     name: "secret-assignment",
+    // `(?!\*{3})` — nunca re-redige um placeholder já injetado por regra
+    // específica anterior (sk-***/AIza***/gh-***/Bearer ***/***REDACTED_JWT***),
+    // preservando o placeholder dedicado do JWT e a idempotência.
     pattern:
-      /\b(password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|bearer[_-]?token|private[_-]?key)\b(\s*[:=]\s*)(["']?)([^\s"'<>,;]{6,})\3/gi,
+      /\b(password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|bearer[_-]?token|github[_-]?token|token|private[_-]?key)\b(\s*[:=]\s*)(["']?)(?!\*{3})([^\s"'<>,;]{6,})\3/gi,
     replacement: (_match: string, key: string, sep: string, quote: string) =>
       `${key}${sep}${quote}${REDACTED_PLACEHOLDER}${quote}`,
   },

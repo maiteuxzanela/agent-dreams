@@ -15,11 +15,18 @@
  *               geradas pelo ciclo de sono não contêm credenciais puras.
  *
  * Nota de calibração: `containsSecret` é assertivo para os padrões com prefixo
- * (sk-/AIza/Bearer/JWT — placeholder quebra o regex), mas a regra genérica de
- * atribuição (`chave=valor`) ainda casa com o próprio placeholder
- * (`password="***REDACTED***"`). Por isso a asserção canônica de "ausência de
- * vazamento" é a ABSENÇÃO DA CREDENCIAL CRUA no texto persistido — nunca
- * `containsSecret(texto_já_redigido) === false` para atribuições.
+ * (sk-/AIza/Bearer/JWT/ghp_/github_pat_ — placeholder quebra o regex), mas a
+ * regra genérica de atribuição (`chave=valor`, incl. `token=` e `github_token=`)
+ * ainda casa com o próprio placeholder (`password="***REDACTED***"`). Por isso a
+ * asserção canônica de "ausência de vazamento" é a ABSENÇÃO DA CREDENCIAL CRUA
+ * no texto persistido — nunca `containsSecret(texto_já_redigido) === false` para
+ * atribuições.
+ *
+ * Cobertura da remedição F1/F2 (tokens GitHub + keyword `token=` bare):
+ *   - Fixtures: `ghp_...`, `github_pat_...`, `token=...`, `github_token=...` e o
+ *     interplay `github_token=ghp_...`.
+ *   - Asserções por cenário provando ausência do token cru em disco (JSONL),
+ *     SQLite + FTS (`dream_recall`) e projeções markdown.
  */
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import fs from "fs";
@@ -39,8 +46,27 @@ const STANDALONE_JWT =
   "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c";
 const PASSWORD_VALUE = "SuperSecret123!";
 
+// TICKET-DREAMS-06 remedição F1/F2 — tokens GitHub e keyword `token=` bare.
+// `ghp_` clássico (exemplo canônico do ticket) e `github_pat_` fine-grained.
+const GITHUB_GHP = "ghp_AbCdEf1234567890GhIjKlMnOpQrStUvWxYz"; // ghp_ + 36 chars [A-Za-z0-9_]
+const GITHUB_PAT = "github_pat_11ABCDEFGHijklmnopQRSTUVWXYZ_22abcdefghijklmnopqrstuvwxyz33"; // github_pat_ + 20+
+// Valores NÃO-token (não casam regra específica) forçando a regra de atribuição
+// `token=` / `github_token=` a atuar sozinha.
+const TOKEN_ASSIGN_VALUE = "Kx7LmQ2Zb9FhN4wR8Td3Gv6Wq"; // atribuição `token=...`
+const GH_TOKEN_ASSIGN_VALUE = "Zx9PlmQ7Rt2VbWn4Kd6Hs0JfNc"; // atribuição `github_token=...`
+
 /** Credenciais crua-únicas: ausência obrigatória em TODO persistido. */
-const RAW_SECRETS = [OPENAI_KEY, GOOGLE_KEY, BEARER_JWT, STANDALONE_JWT, PASSWORD_VALUE] as const;
+const RAW_SECRETS = [
+  OPENAI_KEY,
+  GOOGLE_KEY,
+  BEARER_JWT,
+  STANDALONE_JWT,
+  PASSWORD_VALUE,
+  GITHUB_GHP,
+  GITHUB_PAT,
+  TOKEN_ASSIGN_VALUE,
+  GH_TOKEN_ASSIGN_VALUE,
+] as const;
 
 /** Assert de defesa: nenhum segredo cru pode aparecer no texto persistido. */
 function expectNoRawSecrets(text: string, label: string): void {
@@ -177,6 +203,62 @@ describe("TICKET-DREAMS-06 — Cenário A: dream_learn redige o JSONL diário", 
       dbBefore.close();
     }
   });
+
+  test("A5: tokens GitHub (ghp_/github_pat_) e atribuições token=/github_token= são censurados no JSONL diário", () => {
+    const facts = [
+      {
+        scope: "collective",
+        fact: `CI clonou o repositório com ${GITHUB_GHP} no runner`,
+        category: "learning" as const,
+      },
+      {
+        scope: "agent:morgan",
+        fact: `PAT fine-grained ${GITHUB_PAT} expirou no workflow de release`,
+        category: "pitfall" as const,
+      },
+      {
+        scope: "agent:morgan",
+        fact: `deploy exportou token=${TOKEN_ASSIGN_VALUE} na env`,
+        category: "preference" as const,
+      },
+      {
+        scope: "collective",
+        fact: `plugin configurado com github_token=${GH_TOKEN_ASSIGN_VALUE} no config`,
+        category: "decision" as const,
+      },
+      {
+        scope: "collective",
+        fact: `interplay github_token=${GITHUB_GHP} colado cru no CI`,
+        category: "learning" as const,
+      },
+    ];
+    for (const f of facts) dream_learn(f, { dailyDir: DAILY_DIR });
+
+    // Nenhum dos arquivos JSONL do diretório isolado pode conter token cru.
+    for (const file of dailyJsonlPaths()) {
+      expectNoRawSecrets(fs.readFileSync(file, "utf-8"), `A5/${path.basename(file)}`);
+    }
+
+    const records = readDailyJsonlRecords();
+    const persistedFacts = records.map((r) => r.fact);
+    for (const f of facts) {
+      const sanitized = redactSecrets(f.fact);
+      expect(sanitized).not.toBe(f.fact); // a redação REALMENTE ocorreu
+      expect(persistedFacts).toContain(sanitized); // seam gravou EXATAMENTE o sanitizado
+      expect(redactSecrets(sanitized)).toBe(sanitized); // ponto fixo ⇒ idempotente
+    }
+
+    const ghFacts = persistedFacts.join("\n");
+    expect(ghFacts).toContain(`gh-${REDACTED_PLACEHOLDER}`); // ghp_ e github_pat_ colapsam no placeholder gh-
+    expect(ghFacts).toContain(`token=${REDACTED_PLACEHOLDER}`);
+    expect(ghFacts).toContain(`github_token=${REDACTED_PLACEHOLDER}`); // inclusive o interplay github_token=ghp_...
+
+    // Rede de segurança: os novos fixtures integram a varredura global (D3).
+    for (const raw of [GITHUB_GHP, GITHUB_PAT, TOKEN_ASSIGN_VALUE, GH_TOKEN_ASSIGN_VALUE]) {
+      expect((RAW_SECRETS as readonly string[]).includes(raw)).toBe(true);
+      expect(ghFacts).not.toContain(raw);
+    }
+  });
 });
 
 describe("TICKET-DREAMS-06 — Cenário B: dual-write SQLite + dream_recall censurados", () => {
@@ -222,6 +304,37 @@ describe("TICKET-DREAMS-06 — Cenário B: dual-write SQLite + dream_recall cens
     }
     // O token cru do segredo nunca foi persistido ⇒ não pode casar no FTS5.
     expect(results.length).toBe(0);
+  });
+
+  test("B4: dual-write de tokens GitHub e token= no SQLite — FTS/recall nunca indexam o valor cru", () => {
+    const ghpFact = `CI clonou o repositório com ${GITHUB_GHP} no runner`;
+    const patFact = `PAT fine-grained ${GITHUB_PAT} expirou no release`;
+    const assignFact = `plugin configurado com github_token=${GITHUB_GHP} no config`;
+    dream_learn({ scope: "collective", fact: ghpFact, category: "learning" }, { dailyDir: DAILY_DIR, db });
+    dream_learn({ scope: "agent:morgan", fact: patFact, category: "pitfall" }, { dailyDir: DAILY_DIR, db });
+    dream_learn({ scope: "collective", fact: assignFact, category: "decision" }, { dailyDir: DAILY_DIR, db });
+
+    const rows = db.getAllMemories();
+    // Invariante global do banco APÓS o dual-write: zero credencial crua.
+    for (const row of rows) expectNoRawSecrets(row.fact, `B4/row#${row.id}`);
+
+    // O fato persistido é EXATAMENTE o sanitizado (mesmo discurso do JSONL).
+    expect(rows.some((m) => m.fact === redactSecrets(ghpFact))).toBe(true);
+    expect(rows.some((m) => m.fact === redactSecrets(patFact))).toBe(true);
+    expect(rows.some((m) => m.fact === redactSecrets(assignFact))).toBe(true);
+    expect(rows.some((m) => m.fact.includes(`gh-${REDACTED_PLACEHOLDER}`))).toBe(true);
+    expect(rows.some((m) => m.fact.includes(`github_token=${REDACTED_PLACEHOLDER}`))).toBe(true);
+
+    // Buscar pelo TOKEN CRU no FTS5 não devolve nada: o valor nunca foi indexado.
+    const byRaw = db.recall("AbCdEf1234567890GhIjKlMnOpQrStUvWxYz", "collective");
+    expect(byRaw.length).toBe(0);
+    for (const r of byRaw) expect(r.fact).not.toContain(GITHUB_GHP);
+
+    // Recall por termo NÃO-secreto devolve o fato censurado (prova de pipeline).
+    const out = dream_recall({ query: "clonou repositório runner", scope: "collective" }, db);
+    expect(out).toContain(`gh-${REDACTED_PLACEHOLDER}`);
+    expect(out).not.toContain(GITHUB_GHP);
+    expectNoRawSecrets(out, "B4/recall");
   });
 });
 
@@ -283,6 +396,39 @@ describe("TICKET-DREAMS-06 — Cenário C: defesa em profundidade em DreamsDB.in
     expect(all).toContain(REDACTED_JWT_PLACEHOLDER);
     expect(all).toContain(`password=${REDACTED_PLACEHOLDER}`);
   });
+
+  test("C5: insertMemory DIRETO redige ghp_/github_pat_ e atribuições token=/github_token=", () => {
+    const cases: Array<{ fact: string; expected: string }> = [
+      { fact: `clone com ${GITHUB_GHP} no CI`, expected: `gh-${REDACTED_PLACEHOLDER}` },
+      { fact: `fine-grained ${GITHUB_PAT} revogada`, expected: `gh-${REDACTED_PLACEHOLDER}` },
+      { fact: `env token=${TOKEN_ASSIGN_VALUE} setada`, expected: `token=${REDACTED_PLACEHOLDER}` },
+      {
+        fact: `config github_token=${GH_TOKEN_ASSIGN_VALUE} carregada`,
+        expected: `github_token=${REDACTED_PLACEHOLDER}`,
+      },
+      {
+        fact: `interplay github_token=${GITHUB_GHP} no workflow`,
+        expected: `github_token=${REDACTED_PLACEHOLDER}`,
+      },
+    ];
+
+    const ids = cases.map(({ fact, expected }) => {
+      const id = db.insertMemory("agent:hugo", fact, "pitfall");
+      const row = db.getAllMemories().find((m) => m.id === id);
+      expect(row).toBeDefined();
+      expect(row!.fact).toBe(redactSecrets(fact)); // seam reaplica a MESMA função
+      expect(row!.fact).toContain(expected);
+      expect(row!.fact).not.toContain(GITHUB_GHP);
+      expect(row!.fact).not.toContain(GITHUB_PAT);
+      expect(row!.fact).not.toContain(TOKEN_ASSIGN_VALUE);
+      expect(row!.fact).not.toContain(GH_TOKEN_ASSIGN_VALUE);
+      return id;
+    });
+
+    // Cinco entradas distintas ⇒ cinco rows distintas (sem colapso indevido de dedup).
+    expect(new Set(ids).size).toBe(cases.length);
+    for (const row of db.getAllMemories()) expectNoRawSecrets(row.fact, `C5/row#${row.id}`);
+  });
 });
 
 describe("TICKET-DREAMS-06 — Cenário D: projeções markdown sem credenciais puras", () => {
@@ -325,7 +471,38 @@ describe("TICKET-DREAMS-06 — Cenário D: projeções markdown sem credenciais 
     expect(persona).toContain(`AIza${REDACTED_PLACEHOLDER}`);
   });
 
-  test("D2: varredura recursiva de TODO o diretório isolado — zero credencial crua em nenhum arquivo (jsonl, md, db)", () => {
+  test("D2: tokens GitHub e atribuições token= são projetados censurados (COLLECTIVE_MEMORY.md / personas/*.md)", async () => {
+    dream_learn(
+      {
+        scope: "collective",
+        fact: `CI coletivo usou ${GITHUB_GHP} e github_token=${GH_TOKEN_ASSIGN_VALUE} no deploy`,
+        category: "decision",
+      },
+      { dailyDir: DAILY_DIR, db }
+    );
+    dream_learn(
+      { scope: "agent:morgan", fact: `workflow do morgan com ${GITHUB_PAT} e token=${TOKEN_ASSIGN_VALUE}`, category: "pitfall" },
+      { dailyDir: DAILY_DIR, db }
+    );
+
+    await cycle.lightSleep(); // ingere JSONL (já censurado) → SQLite (re-redigido)
+    await cycle.deepSleep(); // decaimento + updateProjections (pós-poda)
+
+    const collective = fs.readFileSync(path.join(COLLECTIVE_DIR, "COLLECTIVE_MEMORY.md"), "utf-8");
+    const morgan = fs.readFileSync(path.join(PERSONAS_DIR, "morgan.md"), "utf-8");
+
+    // Nenhum token GitHub cru nem valor de atribuição nas projeções em disco.
+    expectNoRawSecrets(collective, "D2/COLLECTIVE_MEMORY.md");
+    expectNoRawSecrets(morgan, "D2/personas/morgan.md");
+
+    // Prova de pipeline: os placeholders dedicados PROJETARAM-SE (não é arquivo vazio).
+    expect(collective).toContain(`gh-${REDACTED_PLACEHOLDER}`);
+    expect(collective).toContain(`github_token=${REDACTED_PLACEHOLDER}`);
+    expect(morgan).toContain(`gh-${REDACTED_PLACEHOLDER}`);
+    expect(morgan).toContain(`token=${REDACTED_PLACEHOLDER}`);
+  });
+
+  test("D3: varredura recursiva de TODO o diretório isolado — zero credencial crua em nenhum arquivo (jsonl, md, db)", () => {
     const offenders: string[] = [];
     const walk = (dir: string) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

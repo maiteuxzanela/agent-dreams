@@ -141,11 +141,13 @@ describe("[4A] dedup semântica same-scope", () => {
 // 2. Hierarquia de escopo cruzado
 // ---------------------------------------------------------------------------
 describe("[4A] promoção Persona ➔ Coletivo", () => {
-  test("promove a melhor cópia de persona herdando score/confirmações (sem +1) e expurga clones", () => {
+  test("promove a melhor cópia de persona REFORÇANDO score/confirmações (+0.5/+1) e expurga clones", () => {
     const db = makeDb();
     const xId = db.insertMemory("agent:x", "Laya RLCD usa inferencia local", "decision", 2.0, 0.3);
     const zId = db.insertMemory("agent:z", "inferencia local usa Laya RLCD", "decision", 1.0, 0.3);
     expect(xId).not.toBe(zId);
+    // Sentinela temporal para provar que a promoção TAMBÉM atualiza last_reinforced (DREAMS-07B).
+    rawRun(db, "UPDATE memories SET last_reinforced = ? WHERE id = ?", [OLD, xId]);
 
     const cId = db.insertMemory("collective", "Usa Laya RLCD inferencia local!", "decision");
 
@@ -155,13 +157,33 @@ describe("[4A] promoção Persona ➔ Coletivo", () => {
     expect(all.length).toBe(1);
     expect(all[0].scope).toBe("collective");
     expect(all[0].id).toBe(xId);
-    // Herança SEM inflação: score/confirmations preservados, não somados.
-    expect(all[0].score).toBe(2.0);
-    expect(all[0].confirmations).toBe(1);
+    // TICKET-DREAMS-07B: a promoção CONFIRMA a memória (score +0.5, +1 confirmação).
+    expect(all[0].score).toBe(2.5);
+    expect(all[0].confirmations).toBe(2);
+    expect(all[0].last_reinforced).not.toBe(OLD);
+    expect(new Date(all[0].last_reinforced).getTime()).toBeGreaterThan(new Date(OLD).getTime());
 
     expect(db.listMemories({ scope: "agent:x" }).length).toBe(0);
     expect(db.listMemories({ scope: "agent:z" }).length).toBe(0);
     expect(db.listMemories({ scope: "collective" }).length).toBe(1);
+  });
+
+  test("promoção com reinforce=false preserva score/confirmações e last_reinforced (sem inflação)", () => {
+    const db = makeDb();
+    const xId = db.insertMemory("agent:x", "Laya RLCD usa inferencia local", "decision", 2.0, 0.3);
+    db.insertMemory("agent:z", "inferencia local usa Laya RLCD", "decision", 1.0, 0.3);
+    rawRun(db, "UPDATE memories SET last_reinforced = ? WHERE id = ?", [OLD, xId]);
+
+    const cId = db.insertMemory("collective", "Usa Laya RLCD inferencia local!", "decision", undefined, undefined, {
+      reinforce: false,
+    });
+
+    expect(cId).toBe(xId);
+    const row = oneRow<any>(db, "SELECT * FROM memories WHERE id = ?", [xId]);
+    expect(row.scope).toBe("collective");
+    expect(row.score).toBe(2.0); // herdado sem inflação
+    expect(row.confirmations).toBe(1);
+    expect(row.last_reinforced).toBe(OLD); // NÃO atualizado
   });
 });
 

@@ -22,6 +22,15 @@
  * NUNCA lança exceção não tratada: banco inexistente, vazio, corrompido ou
  * indisponível retornam `[]` (fail-soft; o erro é apenas repassado ao
  * callback opcional `onError`, nunca propagado).
+ *
+ * TICKET-DREAMS-08 (Frente 8A) — INGESTÃO INTEGRAL EM CHUNKS: além do resumo
+ * de disparo único (`summarizeDialogues`, mantido por compatibilidade), este
+ * módulo expõe `chunkDialogues` / `chunkDialogueText` / `buildDialogueSummary`.
+ * Eles particionam TODO o diálogo do dia em fatias sequenciais seguras
+ * (orçamento de caracteres E de bytes UTF-8), SEM o truncamento invertido que
+ * omitia o início do dia (`[… início do dia omitido]`). O REM Sleep consome
+ * cada fatia individualmente, de modo que dias com >120.000 caracteres são
+ * processados integralmente (manhã, tarde e noite).
  */
 import { Database } from "bun:sqlite";
 import fs from "fs";
@@ -321,16 +330,48 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
 }
 
 /**
- * Agrupa os trechos por sessão e produz um resumo textual conciso, pronto para
- * ser injetado num prompt de síntese (outra camada do Dreams).
+ * Orçamento padrão de caracteres por chunk de diálogo (~100k, conforme o
+ * desenho do TICKET-DREAMS-08).
  */
-export function summarizeDialogues(
-  entries: DialogEntry[],
-  options: { maxChars?: number; label?: string } = {}
-): string {
-  const maxChars = options.maxChars ?? 120_000;
-  if (entries.length === 0) return options.label ? `${options.label}: (sem diálogos)` : "";
+export const DEFAULT_MAX_CHARS_PER_CHUNK = 100_000;
 
+/**
+ * Orçamento padrão em BYTES UTF-8 por chunk de diálogo.
+ *
+ * Mantido com folga abaixo de `MAX_PROMPT_BYTES` (128.000, em
+ * `mimo_synthesizer.ts`) para que `buildCappedPrompt` NUNCA precise truncar um
+ * chunk — inclusive em texto densamente acentuado (até ~2 bytes por caractere
+ * em pt-BR). É o que garante o critério "sem emissão de `[… início do dia
+ * omitido]`": o teto do prompt é respeitado POR CHUNK, e não por descarte.
+ */
+export const DEFAULT_MAX_BYTES_PER_CHUNK = 110_000;
+
+/** Opções de particionamento de diálogo em chunks sequenciais. */
+export interface ChunkDialogueOptions {
+  /** Máximo de caracteres por chunk. Padrão: `DEFAULT_MAX_CHARS_PER_CHUNK`. */
+  maxCharsPerChunk?: number;
+  /** Máximo de bytes UTF-8 por chunk. Padrão: `DEFAULT_MAX_BYTES_PER_CHUNK`. */
+  maxBytesPerChunk?: number;
+}
+
+/** Comprimento real de `text` em bytes UTF-8 (≠ `String.length`, que é UTF-16). */
+function dialogueUtf8Bytes(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
+/** Normaliza um orçamento para um inteiro positivo (fallback em valor inválido). */
+function normalizeChunkBudget(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  const budget = Math.floor(value);
+  return budget > 0 ? budget : fallback;
+}
+
+/**
+ * Renderiza os trechos agrupados por sessão num texto único e COMPLETO — sem
+ * qualquer truncamento. É a matéria-prima tanto do resumo de disparo único
+ * quanto do particionamento em chunks.
+ */
+function renderDialogueBlocks(entries: DialogEntry[]): string {
   const bySession = new Map<string, DialogEntry[]>();
   for (const entry of entries) {
     const bucket = bySession.get(entry.session_id);
@@ -352,13 +393,135 @@ export function summarizeDialogues(
     blocks.push(lines.join("\n"));
   }
 
-  const full = blocks.join("\n\n");
+  return blocks.join("\n\n");
+}
+
+/**
+ * Devolve o resumo textual COMPLETO da janela lida — sem truncamento e sem
+ * omissão do início do dia. Usado pelo handoff do Light Sleep para que TODO o
+ * diálogo capturado chegue ao REM Sleep, que então o particiona em chunks.
+ */
+export function buildDialogueSummary(entries: DialogEntry[]): string {
+  return renderDialogueBlocks(entries);
+}
+
+/**
+ * Agrupa os trechos por sessão e produz um resumo textual conciso, pronto para
+ * ser injetado num prompt de síntese (outra camada do Dreams).
+ *
+ * COMPATIBILIDADE (TICKET-DREAMS-08): mantido com o comportamento histórico de
+ * truncamento invertido (cauda preservada + prefixo `[… início do dia
+ * omitido]`) para os fluxos de disparo único. Para ingestão integral em fatias
+ * sequenciais — sem descarte do início do dia — use `chunkDialogues`.
+ */
+export function summarizeDialogues(
+  entries: DialogEntry[],
+  options: { maxChars?: number; label?: string } = {}
+): string {
+  const maxChars = options.maxChars ?? 120_000;
+  if (entries.length === 0) return options.label ? `${options.label}: (sem diálogos)` : "";
+
+  const full = renderDialogueBlocks(entries);
   if (full.length <= maxChars) return full;
   // Truncamento invertido: fatiar o final da timeline com prefixo de omissão,
   // garantindo que as mensagens mais recentes do final do dia NUNCA sejam perdidas.
   const prefix = "[… início do dia omitido]\n\n";
   const budget = Math.max(0, maxChars - prefix.length);
   return prefix + full.slice(-budget).trimStart();
+}
+
+/**
+ * Particiona um texto de diálogo em fatias sequenciais que respeitam, cada
+ * uma, os orçamentos de caracteres E de bytes UTF-8 — SEM descartar nenhum
+ * trecho (diferentemente do truncamento invertido histórico, que omitia o
+ * início do dia). As fronteiras preferem quebras de linha; uma linha isolada
+ * maior que o orçamento é fatiada por bytes, nunca partindo code points
+ * multibyte (append seguro de `Buffer.subarray`).
+ *
+ * Garantias:
+ *  - todo chunk resultante cabe em `maxCharsPerChunk` e em `maxBytesPerChunk`;
+ *  - a concatenação dos chunks (com "\n") reconstitui todo o texto de entrada
+ *    (nenhum caractere é perdido, salvo quebras de linha de fronteira).
+ */
+export function chunkDialogueText(
+  text: string,
+  options: ChunkDialogueOptions = {}
+): string[] {
+  const maxChars = normalizeChunkBudget(
+    options.maxCharsPerChunk,
+    DEFAULT_MAX_CHARS_PER_CHUNK
+  );
+  const maxBytes = normalizeChunkBudget(
+    options.maxBytesPerChunk,
+    DEFAULT_MAX_BYTES_PER_CHUNK
+  );
+  if (text.trim() === "") return [];
+
+  const chunks: string[] = [];
+  let current = "";
+
+  const flush = () => {
+    if (current.trim() !== "") chunks.push(current);
+    current = "";
+  };
+  const fits = (candidate: string): boolean =>
+    candidate.length <= maxChars && dialogueUtf8Bytes(candidate) <= maxBytes;
+
+  for (const line of text.split("\n")) {
+    if (fits(line)) {
+      if (current === "") {
+        current = line;
+        continue;
+      }
+      const candidate = `${current}\n${line}`;
+      if (fits(candidate)) {
+        current = candidate;
+      } else {
+        flush();
+        current = line;
+      }
+      continue;
+    }
+
+    // Linha isolada maior que o orçamento: fecha o chunk corrente e fatia a
+    // linha por bytes. O corte por bytes é seguido da remoção de eventuais
+    // U+FFFD de fronteira (code point partido) antes de avançar o buffer.
+    flush();
+    let buffer = Buffer.from(line, "utf8");
+    while (buffer.length > maxBytes || buffer.toString("utf8").length > maxChars) {
+      const take = Math.min(buffer.length, maxBytes);
+      let piece = buffer
+        .subarray(0, take)
+        .toString("utf8")
+        .replace(/\uFFFD+$/, "");
+      if (piece.length > maxChars) piece = piece.slice(0, maxChars);
+      if (piece.length === 0) {
+        // Orçamento mínimo extremo: garante progresso de ao menos 1 byte.
+        piece = buffer.subarray(0, 1).toString("utf8").replace(/\uFFFD+/g, "") || "?";
+      }
+      chunks.push(piece);
+      buffer = buffer.subarray(Math.max(1, dialogueUtf8Bytes(piece)));
+    }
+    current = buffer.toString("utf8");
+  }
+
+  flush();
+  return chunks;
+}
+
+/**
+ * Particiona os trechos de diálogo (já agrupados por sessão/cronologia) em
+ * chunks textuais sequenciais seguros — a API de ingestão integral do
+ * TICKET-DREAMS-08. Devolve `[]` quando não há trechos e NUNCA omite o início
+ * do dia: a concatenação de `chunkDialogues(entries)` contém TODAS as
+ * conversas do dia.
+ */
+export function chunkDialogues(
+  entries: DialogEntry[],
+  options: ChunkDialogueOptions = {}
+): string[] {
+  if (entries.length === 0) return [];
+  return chunkDialogueText(renderDialogueBlocks(entries), options);
 }
 
 /**

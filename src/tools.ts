@@ -1,4 +1,4 @@
-import { DreamsDB } from "./core/db";
+import { DreamsDB, type MemoryCategory } from "./core/db";
 import { redactSecrets } from "./core/security";
 import fs from "fs";
 import path from "path";
@@ -10,6 +10,23 @@ const DAILY_DIR = path.join(DREAMS_DIR, "daily");
 // DEF-03: escopo válido é 'collective' ou 'agent:<nome>' com nome seguro.
 // Bloqueia Directory Traversal e escopos malformados.
 const SCOPE_PATTERN = /^(collective|agent:[a-zA-Z0-9_-]+)$/;
+
+/**
+ * Forma canônica de uma linha do JSONL diário (`dreams/daily/log_<data>.jsonl`).
+ *
+ * `synced_to_db` (TICKET-DREAMS-07, Frente A) é OPCIONAL e só é anexado quando
+ * o dual-write SÍNCRONO no SQLite teve sucesso durante a vigília. É o sinal
+ * consumido pelo Light Sleep para saber que o fato já possui sua confirmação
+ * canônica no banco e não deve ser reforçado novamente na madrugada da
+ * primeira noite (`reinforce: !isTrivial && !record.synced_to_db`).
+ */
+interface DailyRecord {
+  scope: string;
+  fact: string;
+  category: MemoryCategory;
+  timestamp: string;
+  synced_to_db?: boolean;
+}
 
 /**
  * `dream_learn` persiste o fato em DUAS camadas:
@@ -47,30 +64,34 @@ export function dream_learn(
 
   const dateStr = new Date().toISOString().split("T")[0];
   const file = path.join(dailyDir, `log_${dateStr}.jsonl`);
-  
-  const record = {
+
+  const record: DailyRecord = {
     scope: args.scope,
     fact: sanitizedFact,
     category: args.category,
     timestamp: new Date().toISOString()
   };
 
-  // Fonte de verdade durável da vigília: o JSONL diário (ingerido no Light Sleep).
-  fs.appendFileSync(file, JSON.stringify(record) + "\n");
-
-  // TICKET-DREAMS-03 (Frente A) — DUAL-WRITE SÍNCRONO:
-  // além do JSONL, espelha imediatamente no SQLite para que o fato seja
-  // consultável por `dream_recall` JÁ no mesmo turno de vigília, sem esperar
-  // o ciclo noturno. O JSONL permanece a fonte de verdade: se o espelho no
-  // SQLite falhar (lock transitório, DB indisponível), o fato não é perdido e
-  // a tool não quebra o chat do usuário — apenas registra o desvio.
+  // TICKET-DREAMS-07 (Frente A) — DUAL-WRITE SÍNCRONO PRIMEIRO:
+  // a tentativa de persistência no SQLite acontece ANTES do append no JSONL
+  // diário. Se o insert síncrono tiver sucesso, o record é marcado com
+  // `synced_to_db: true` — evidência de que o fato JÁ nasceu no banco com sua
+  // confirmação canônica e NÃO deve ser reforçado de novo pelo Light Sleep na
+  // madrugada da primeira noite. O JSONL permanece a fonte de verdade: se o
+  // espelho no SQLite falhar (lock transitório, DB indisponível) ou se o `db`
+  // não for injetado, a flag é simplesmente omitida e o fato não é perdido —
+  // a tool nunca quebra o chat do usuário, apenas registra o desvio.
   if (options.db) {
     try {
       options.db.insertMemory(args.scope, sanitizedFact, args.category);
+      record.synced_to_db = true;
     } catch (e) {
       console.error("[Dreams] dual-write para SQLite falhou:", e);
     }
   }
+
+  // Fonte de verdade durável da vigília: o JSONL diário (ingerido no Light Sleep).
+  fs.appendFileSync(file, JSON.stringify(record) + "\n");
 
   return `Memory logged to daily stream for scope '${args.scope}'. Will be consolidated tonight.`;
 }

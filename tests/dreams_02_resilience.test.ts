@@ -13,7 +13,9 @@
  *       100% íntegro (sem amnésia, sem memórias falsas).
  *    4. LIMPEZA SÓ NO SUCESSO: o pendente é removido e `last_synthesized_at`
  *       avança APENAS quando a síntese REM teve sucesso comprovado.
- *    5. TETO: o handoff acumulado nunca excede `MAX_PROMPT_BYTES` (cauda preservada).
+ *    5. INGESTÃO INTEGRAL (TICKET-DREAMS-08): o handoff acumulado retém o dia
+ *       inteiro (sem corte rígido de 120k); o teto `MAX_PROMPT_BYTES` passa a
+ *       valer POR CHUNK no REM Sleep, nunca por descarte do início do dia.
  *    6. FRONTEIRA DE LEITURA: sem pendente em disco, `loadPendingDialogue` lê o
  *       DB SOMENTE após `last_synthesized_at`.
  *    7. `markSynthesisComplete` é o único caminho que limpa/avança a fronteira.
@@ -39,6 +41,7 @@ import path from "path";
 import { DreamsDB } from "../src/core/db";
 import { SleepCycle, DIALOGUE_CHECKPOINT_FILENAME } from "../src/core/sleep_cycle";
 import { MAX_PROMPT_BYTES, utf8ByteLength } from "../src/core/mimo_synthesizer";
+import { chunkDialogueText } from "../src/core/session_reader";
 import {
   EXIT_OK,
   EXIT_FATAL,
@@ -324,10 +327,11 @@ describe("TICKET-DREAMS-02A — checkpoint cumulativo de handoff (C3)", () => {
     expect(mems[0].fact).toBe("MEMORIA SINTETIZADA COM SUCESSO PELA SEAM REAL");
   });
 
-  test("TETO: handoff acumulado nunca excede MAX_PROMPT_BYTES e preserva a cauda", async () => {
+  test("INGESTÃO INTEGRAL: handoff acumulado retém o dia inteiro (sem corte de 120k); teto passa a ser POR CHUNK", async () => {
     const { db, baseDir } = makeDb("cap");
     const pending = path.join(baseDir, "dialogue_pending.txt");
-    fs.writeFileSync(pending, "A".repeat(200_000)); // 200000 bytes > teto
+    const bigBlock = "A".repeat(200_000); // 200000 bytes > teto antigo de 120k
+    fs.writeFileSync(pending, bigBlock);
     const past = new Date(Date.now() - 10 * 60 * 1000);
     fs.utimesSync(pending, past, past);
 
@@ -338,11 +342,24 @@ describe("TICKET-DREAMS-02A — checkpoint cumulativo de handoff (C3)", () => {
 
     await cycle.lightSleep();
 
-    const buf = fs.readFileSync(pending);
-    expect(buf.byteLength).toBeLessThanOrEqual(MAX_PROMPT_BYTES);
-    expect(utf8ByteLength(buf.toString("utf8"))).toBeLessThanOrEqual(MAX_PROMPT_BYTES);
-    // A cauda mais recente (o diálogo novo) sobrevive ao corte.
-    expect(buf.toString("utf8")).toContain("CAUDA NOVA UNICA");
+    // TICKET-DREAMS-08 (Frente 8A): o corte rígido por `MAX_PROMPT_BYTES` foi
+    // REMOVIDO do handoff — o início do dia (bloco antigo de 200k) NÃO é mais
+    // descartado; a cauda mais recente também sobrevive, em ordem temporal.
+    const after = fs.readFileSync(pending, "utf8");
+    expect(after).toContain(bigBlock);
+    expect(after).toContain("CAUDA NOVA UNICA");
+    expect(after.indexOf(bigBlock)).toBeLessThan(after.indexOf("CAUDA NOVA UNICA"));
+    expect(after).not.toContain("início do dia omitido");
+
+    // O teto do prompt permanece inviolável, agora POR CHUNK: cada fatia gerada
+    // pelo particionador cabe com folga sob MAX_PROMPT_BYTES, e a concatenação
+    // reconstrói o handoff inteiro (nenhum caractere perdido).
+    const chunks = chunkDialogueText(after);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(utf8ByteLength(chunk)).toBeLessThanOrEqual(MAX_PROMPT_BYTES);
+    }
+    expect(chunks.join("\n").replace(/\n/g, "")).toBe(after.replace(/\n/g, ""));
     expect(past.getTime()).toBeLessThan(Date.now());
   });
 

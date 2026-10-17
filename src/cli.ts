@@ -1,12 +1,9 @@
-import { Database } from "bun:sqlite";
 import { DreamsDB, type MemoryRecord } from "./core/db";
 import { SleepCycle } from "./core/sleep_cycle";
+import { readRecentDialogues, type DialogEntry } from "./core/session_reader";
 import fs from "fs";
 import path from "path";
 import os from "os";
-
-// DEF-11: sem caminhos absolutos hardcoded — deriva do homedir do usuário.
-const DB_PATH = path.join(os.homedir(), ".local", "share", "opencode", "opencode.db");
 
 // ---------------------------------------------------------------------------
 // TICKET-DREAMS-02 (Frente 2C / C5): códigos de saída semânticos, detecção de
@@ -191,6 +188,195 @@ export function formatMemoryLine(m: MemoryRecord): string {
   return `#${id} [${m.scope}] ${m.category} (score ${score.toFixed(2)}) ${m.fact}`;
 }
 
+// ---------------------------------------------------------------------------
+// TICKET-DREAMS-08 (Card B): `dreams backfill` reescrito sobre o leitor canônico
+// de sessões. A implementação antiga consultava tabelas/colunas inexistentes
+// (`session.time_created`, `event`, `sqlite_master` genérico) e gravava eventos
+// triviais ("Sessão atualizada"/"Sessão compactada"). Agora o backfill lê o
+// diálogo REAL via `readRecentDialogues` (mesma fonte do Light/REM Sleep) e
+// escreve registros de qualidade no log diário canônico que o Light Sleep já
+// ingere (`{scope, fact, category, type}` → `db.insertMemory`).
+// ---------------------------------------------------------------------------
+
+/** Limite padrão de trechos reprocessados pelo `backfill`. */
+export const BACKFILL_DEFAULT_LIMIT = 10;
+
+/** Fatos abaixo deste tamanho são ruído (saudações, "ok", etc.) e descartados. */
+const BACKFILL_MIN_FACT_CHARS = 20;
+
+/** Teto de caracteres de cada fato gravado no log diário. */
+const BACKFILL_MAX_FACT_CHARS = 500;
+
+/** Flags aceitas por `dreams backfill`. */
+export interface BackfillArgs {
+  limit: number;
+}
+
+/**
+ * Parser determinístico de `dreams backfill`:
+ *   --limit <n> | --limit=<n> | <n> posicional   (default 10; inválidos ignorados)
+ *
+ * Recebe os tokens APÓS o subcomando (`args.slice(1)`). O último valor válido
+ * vence, permitindo overrides previsíveis (`backfill 50 --limit=5` ⇒ 5).
+ */
+export function parseBackfillArgs(args: string[]): BackfillArgs {
+  let limit: number | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (token === "--limit") {
+      const value = args[i + 1];
+      const n = Number(value);
+      if (value !== undefined && !value.startsWith("-") && Number.isInteger(n) && n > 0) {
+        limit = n;
+        i++;
+      }
+    } else if (token.startsWith("--limit=")) {
+      const n = Number(token.slice("--limit=".length));
+      if (Number.isInteger(n) && n > 0) limit = n;
+    } else if (/^\d+$/.test(token)) {
+      const n = Number(token);
+      if (Number.isInteger(n) && n > 0) limit = n;
+    }
+  }
+  return { limit: limit ?? BACKFILL_DEFAULT_LIMIT };
+}
+
+/** Opções de `runBackfill` (todas injetáveis para testes determinísticos). */
+export interface BackfillOptions {
+  /** Caminho do SQLite de sessões. Padrão: `~/.local/share/opencode/opencode.db`. */
+  dbPath?: string;
+  /** Diretório raiz das Dreams (isola `daily/` em testes). Padrão: `dreamsDir()`. */
+  baseDir?: string;
+  /** Máximo de trechos gravados. Padrão: `BACKFILL_DEFAULT_LIMIT`. */
+  limit?: number;
+  /** Incluir trechos de `reasoning` (padrão: false — domina o volume e vira ruído). */
+  includeReasoning?: boolean;
+  /** Relógio injetável para nomear `log_<YYYY-MM-DD>.jsonl` de forma determinística. */
+  now?: Date;
+  /** Observabilidade opcional dos erros engolidos pelo fail-soft do leitor. */
+  onError?: (error: unknown) => void;
+}
+
+/** Resultado do backfill (para relatório e asserções de teste). */
+export interface BackfillResult {
+  /** Trechos lidos do diálogo real (antes dos filtros de qualidade). */
+  entriesRead: number;
+  /** Registros efetivamente anexados ao log diário. */
+  written: number;
+  /** Trechos descartados por ruído/deduplicação. */
+  skipped: number;
+  /** Caminho absoluto do log diário canônico. */
+  logFile: string;
+}
+
+/** Um registro do log diário canônico (formato ingerido por `lightSleep`). */
+export interface DailyLogRecord {
+  type: string;
+  scope: string;
+  category: string;
+  fact: string;
+  timestamp: string;
+}
+
+/** Colapsa espaços/quebras e apara as bordas de um trecho de diálogo. */
+function normalizeFactText(text: string): string {
+  return (text ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** Corta o fato em `BACKFILL_MAX_FACT_CHARS`, sinalizando a elipse. */
+function clampFact(text: string): string {
+  if (text.length <= BACKFILL_MAX_FACT_CHARS) return text;
+  return text.slice(0, BACKFILL_MAX_FACT_CHARS).trimEnd() + " …";
+}
+
+/**
+ * Extrai fatos úteis do diálogo real do OpenCode e os grava no log diário
+ * canônico (`~/.config/opencode/dreams/daily/log_<data>.jsonl`) com
+ * `type: "dialogue_backfill"` — formato que o Light Sleep já ingere como memória.
+ *
+ * Fail-soft: banco ausente, vazio, corrompido ou schema divergente produzem
+ * `entriesRead: 0` (o `readRecentDialogues` nunca lança) e nada é gravado; o
+ * arquivo diário só é criado quando há pelo menos um fato de qualidade. Uma
+ * falha real de escrita no log diário é propagada (o chamador decide o exit code).
+ */
+export function runBackfill(options: BackfillOptions = {}): BackfillResult {
+  const limit = Number.isInteger(options.limit) && (options.limit as number) > 0
+    ? (options.limit as number)
+    : BACKFILL_DEFAULT_LIMIT;
+  const baseDir = options.baseDir ?? dreamsDir();
+  const dailyDir = path.join(baseDir, "daily");
+  const now = options.now ?? new Date();
+  const dateStr = now.toISOString().split("T")[0];
+  const logFile = path.join(dailyDir, `log_${dateStr}.jsonl`);
+
+  // Fonte canônica: mesma leitura read-only do OpenCode usada pelo Light Sleep.
+  // Overfetch deliberado: o `limit` do leitor conta MENSAGENS, e mensagens sem
+  // trecho textual (só ferramentas/ruído) não rendem fato. Lemos um múltiplo
+  // limitado e depois retemos os `limit` TRECHOS mais recentes, para que
+  // `--limit N` signifique de fato "até N fatos gravados". Falha ⇒ lista vazia.
+  const fetchLimit = Math.min(Math.max(limit * 4, limit), 2000);
+  const entries: DialogEntry[] = readRecentDialogues({
+    ...(options.dbPath !== undefined ? { dbPath: options.dbPath } : {}),
+    limit: fetchLimit,
+    includeReasoning: options.includeReasoning ?? false,
+    ...(options.onError !== undefined ? { onError: options.onError } : {}),
+  });
+
+  // Retém os `limit` trechos mais RECENTES, preservando a ordem cronológica.
+  const selected = entries.slice(-limit);
+
+  // Idempotência entre execuções: um `backfill` repetido não deve re-anexar o
+  // mesmo fato ao log do dia (spam). Fail-soft: log ausente/ilegível ⇒ sem dedup.
+  const existingFacts = new Set<string>();
+  try {
+    if (fs.existsSync(logFile)) {
+      for (const line of fs.readFileSync(logFile, "utf-8").split("\n")) {
+        if (line.trim() === "") continue;
+        try {
+          const prior = JSON.parse(line) as { fact?: unknown };
+          if (typeof prior.fact === "string") existingFacts.add(prior.fact);
+        } catch {
+          /* linha corrompida isolada: ignora e continua */
+        }
+      }
+    }
+  } catch {
+    /* log ilegível: segue sem dedup, preservando o comportamento fail-soft */
+  }
+
+  const seen = new Set<string>();
+  const records: DailyLogRecord[] = [];
+  let skipped = 0;
+
+  for (const entry of selected) {
+    const text = normalizeFactText(entry.text);
+    if (text.length < BACKFILL_MIN_FACT_CHARS) {
+      skipped++;
+      continue;
+    }
+    const fact = `[${entry.role}] ${clampFact(text)}`;
+    if (seen.has(fact) || existingFacts.has(fact)) {
+      skipped++;
+      continue;
+    }
+    seen.add(fact);
+    records.push({
+      type: "dialogue_backfill",
+      scope: "collective",
+      category: "learning",
+      fact,
+      timestamp: entry.time_iso,
+    });
+  }
+
+  if (records.length > 0) {
+    fs.mkdirSync(dailyDir, { recursive: true });
+    fs.appendFileSync(logFile, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  }
+
+  return { entriesRead: entries.length, written: records.length, skipped, logFile };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -250,151 +436,37 @@ async function main() {
       rotated ? `Rotated ${target} -> ${target}.1` : `No rotation needed for ${target}`
     );
   } else if (cmd === "backfill") {
-    const limit = Number(args[1]) || 10;
+    // Card B (TICKET-DREAMS-08): aceita `--limit 50`, `--limit=50` e `50` (default 10).
+    const { limit } = parseBackfillArgs(args.slice(1));
     console.log(`Starting backfill (limit: ${limit})...`);
-    
-    // Open SQLite in readonly mode
-    let sqliteDb: Database;
     try {
-      sqliteDb = new Database(DB_PATH, { readonly: true });
+      const result = runBackfill({
+        limit,
+        onError: (error) => console.error("[backfill] session_reader:", error),
+      });
+      if (result.written === 0) {
+        if (result.entriesRead === 0) {
+          console.log(
+            "Backfill complete. Nenhum diálogo encontrado " +
+              "(banco de sessões ausente, vazio ou sem conversas legíveis)."
+          );
+        } else {
+          console.log(
+            `Backfill complete. Nenhum fato novo de qualidade ` +
+              `(${result.entriesRead} trecho(s) lido(s), ${result.skipped} descartado(s): ` +
+              `ruído, texto curto ou já registrado).`
+          );
+        }
+      } else {
+        console.log(
+          `Backfill complete. ${result.written} entradas gravadas em ${result.logFile} ` +
+            `(${result.entriesRead} lida(s), ${result.skipped} descartada(s)).`
+        );
+      }
+      process.exitCode = EXIT_OK;
     } catch (e) {
-      console.error(`Error opening SQLite DB at ${DB_PATH}:`, e);
-      process.exit(1);
-    }
-    
-    // Ensure daily dir exists
-    const dailyDir = path.join(os.homedir(), ".config/opencode/dreams/daily");
-    if (!fs.existsSync(dailyDir)) {
-      fs.mkdirSync(dailyDir, { recursive: true });
-    }
-    const dateStr = new Date().toISOString().split("T")[0];
-    const logFile = path.join(dailyDir, `log_${dateStr}.jsonl`);
-    
-    // Read last sessions and messages from SQLite and write to daily log
-    try {
-      // Read events from the event table (session.compacted, session.updated, message.updated)
-      const events = sqliteDb.query<
-        { id: string; aggregate_id: string; type: string; data: string; created: number },
-        [string, number]
-      >("SELECT id, aggregate_id, type, data, created FROM event WHERE type LIKE ? ORDER BY created DESC LIMIT ?")
-        .all("%message.updated%", limit);
-      
-      let entries = 0;
-      
-      // Process events and write to daily log
-      for (const ev of events) {
-        let fact = "";
-        let directory = "/opencode-chambers-harness";
-        let scope = "collective";
-        
-        try {
-          const data = JSON.parse(ev.data);
-          
-          // Extract based on event type
-          if (ev.type.includes("session.updated")) {
-            const info = data.info || {};
-            directory = info.directory || "/opencode-chambers-harness";
-            fact = `Sessão atualizada: ${info.title || info.slug || ev.aggregate_id}`;
-            scope = "collective";
-          } else if (ev.type.includes("message.updated")) {
-            const d = data.data || {};
-            fact = (d.text || "").substring(0, 200) || "Mensagem atualizada";
-            scope = "collective";
-          } else if (ev.type.includes("session.compacted")) {
-            fact = `Sessão compactada: ${ev.aggregate_id}`;
-            scope = "collective";
-          } else {
-            fact = ev.type || "Evento desconhecido";
-            scope = "collective";
-          }
-        } catch (e) {
-          // If data can't be parsed, use basic info
-          fact = ev.type || "Evento desconhecido";
-          scope = "collective";
-        }
-        
-        const record = {
-          type: "event_backfill",
-          scope: scope,
-          category: "learning",
-          fact: fact.substring(0, 200),
-          directory: directory,
-          timestamp: ev.created > 0 ? new Date(ev.created).toISOString() : new Date().toISOString()
-        };
-        
-        fs.appendFileSync(logFile, JSON.stringify(record) + "\n");
-        entries++;
-        
-        if (entries >= limit) break;
-      }
-      
-      // If no events found, try sessions table
-      if (entries === 0) {
-        console.log("No events found, trying sessions table...");
-        const sessions = sqliteDb.query<
-          { id: string; directory: string; title: string; time_created: number },
-          [number]
-        >("SELECT id, directory, title, time_created FROM session ORDER BY time_created DESC LIMIT ?").all(limit);
-        
-        for (const s of sessions) {
-          const record = {
-            type: "session_backfill",
-            scope: "collective",
-            category: "learning",
-            fact: `Sessão no diretório ${s.directory}: ${s.title || "sem título"}`,
-            directory: s.directory || "/opencode-chambers-harness",
-            timestamp: new Date(s.time_created).toISOString()
-          };
-          fs.appendFileSync(logFile, JSON.stringify(record) + "\n");
-          entries++;
-          if (entries >= limit) break;
-        }
-      }
-      
-      // If still no entries, try generic approach
-      if (entries === 0) {
-        console.log("No sessions/events found, trying generic tables...");
-        const tableNames = sqliteDb.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table'").all().map(t => t.name);
-        
-        for (const table of tableNames) {
-          try {
-            // Check if table has relevant columns
-            const cols = (sqliteDb.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name);
-            if (cols.includes("directory") || cols.includes("scope") || cols.includes("fact")) {
-              const rows = sqliteDb.query<Record<string, unknown>, [number]>(`SELECT * FROM ${table} ORDER BY rowid DESC LIMIT ?`).all(limit);
-              for (const row of rows) {
-                const rowObj: any = row;
-                const fact = rowObj.fact || rowObj.content || rowObj.value || JSON.stringify(rowObj).substring(0, 200);
-                const scope = rowObj.scope || "collective";
-                const dir = rowObj.directory || rowObj.dir || "/opencode-chambers-harness";
-                const timestamp = rowObj.created_at || rowObj.time_created || new Date().toISOString();
-                
-                const record = {
-                  type: "session_backfill",
-                  scope: scope,
-                  category: "learning",
-                  fact: String(fact).substring(0, 200),
-                  directory: dir,
-                  timestamp: String(timestamp)
-                };
-                fs.appendFileSync(logFile, JSON.stringify(record) + "\n");
-                entries++;
-                if (entries >= limit) break;
-              }
-            }
-          } catch (e) {
-            // Skip tables that can't be queried
-          }
-          if (entries >= limit) break;
-        }
-      }
-      
-      sqliteDb.close();
-      console.log(`Backfill complete. ${entries} entries written to ${logFile}`);
-    } catch (e) {
-      sqliteDb.close();
       console.error("Error during backfill:", e);
-      process.exit(1);
+      process.exitCode = EXIT_FATAL;
     }
   } else if (cmd === "forget") {
     // Curadoria manual: remove UMA memória específica pelo ID numérico.
@@ -414,6 +486,13 @@ async function main() {
         return;
       }
       db.deleteMemory(id);
+      // TICKET-DREAMS-09 (Card B): reatividade imediata em disco. Apagar a linha
+      // do SQLite NÃO basta — `COLLECTIVE_MEMORY.md`/`personas/*.md` continuariam
+      // injetando a "memória zumbi" no system prompt por até 24h, até o próximo
+      // Deep Sleep regravar as projeções. Regenerá-las aqui torna o `forget`
+      // observável no disco no mesmo instante (o `purgeOrphanPersonaFiles` interno
+      // também remove o arquivo da persona que ficou com 0 memórias ativas).
+      new SleepCycle(db).updateProjections();
       console.log(`Memory #${id} forgotten (${target.scope}: ${target.fact})`);
     } finally {
       db.close();
@@ -423,9 +502,11 @@ async function main() {
     const { scope, limit } = parseListArgs(args.slice(1));
     const db = new DreamsDB();
     try {
-      const memories: MemoryRecord[] = scope
-        ? db.getMemoriesByScope(scope, limit)
-        : db.getAllMemories().sort((a, b) => b.score - a.score).slice(0, limit);
+      // TICKET-DREAMS-09 (Card B): filtro + paginação no PRÓPRIO SQLite via a
+      // query indexada `listMemories` (ORDER BY score DESC, last_reinforced DESC
+      // LIMIT ?) em vez de materializar TODAS as linhas em memória e fatiar em
+      // JavaScript — economiza RAM e I/O em bases grandes.
+      const memories: MemoryRecord[] = db.listMemories({ scope, limit });
 
       if (memories.length === 0) {
         console.log("No memories found.");
@@ -439,7 +520,7 @@ async function main() {
     }
   } else {
     console.log(
-      "Usage: bun run src/cli.ts [consolidate|light|rem|deep|backfill --limit N|forget <id>|list [--scope <scope>] [--limit <n>]|rotate-log [path] [maxBytes]]"
+      "Usage: bun run src/cli.ts [consolidate|light|rem|deep|backfill [--limit N]|forget <id>|list [--scope <scope>] [--limit <n>]|rotate-log [path] [maxBytes]]"
     );
   }
 }

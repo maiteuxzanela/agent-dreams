@@ -2,11 +2,13 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { DreamsDB, MemoryRecord, CATEGORY_WEIGHTS } from "./db";
-import { readRecentDialogueSummary } from "./session_reader";
+import {
+  readRecentDialogues,
+  buildDialogueSummary,
+  chunkDialogueText,
+} from "./session_reader";
 import {
   synthesizeMemories,
-  MAX_PROMPT_BYTES,
-  truncateUtf8Tail,
   utf8ByteLength,
   type SynthesisSource,
   type SynthesizedMemory,
@@ -121,8 +123,17 @@ export class SleepCycle {
             if (category) {
               // DEF-10: eventos triviais de ciclo de vida repetidos não reforçam score.
               const isTrivial = TRIVIAL_EVENT_TYPES.has(record.type);
-              this.db.insertMemory(record.scope, record.fact, category, 1.0, 1.0, {
-                reinforce: !isTrivial
+              // TICKET-DREAMS-07 (Frente B):
+              //  (1) os parâmetros score/decay_weight NÃO são fixados em 1.0/1.0 —
+              //      passa-se `undefined` para que o insertMemory herde
+              //      COMPULSORIAMENTE os pesos canônicos de CATEGORY_WEIGHTS[category]
+              //      (preference 2.5/0.1, decision 2.0/0.3, pitfall 1.8/0.5, learning 1.0/1.0);
+              //  (2) `reinforce` exige não-trivial E fato AINDA NÃO sincronizado ao
+              //      SQLite na vigília. Um record já persistido (`synced_to_db: true`)
+              //      nasceu com 1 confirmação e receberia indevidamente uma SEGUNDA
+              //      confirmação na madrugada da primeira noite.
+              this.db.insertMemory(record.scope, record.fact, category, undefined, undefined, {
+                reinforce: !isTrivial && !record.synced_to_db
               });
               ingested++;
             }
@@ -177,12 +188,16 @@ export class SleepCycle {
         sinceMs = undefined; // relógio retrocedeu: cai para a janela em horas
       }
 
-      const summary = readRecentDialogueSummary({
+      const entries = readRecentDialogues({
         dbPath: this.sessionDbPath,
         ...(sinceMs !== undefined ? { sinceMs } : { hours: this.dialogueHours }),
         includeReasoning: false, // reasoning domina o volume e infla token
         onError: (error) => console.error("[Light Sleep] session_reader:", error),
       });
+      // TICKET-DREAMS-08 (Frente 8A): handoff COMPLETO (sem truncamento e sem
+      // omissão do início do dia). O particionamento em chunks seguros agora é
+      // responsabilidade do REM Sleep (`remSleep` → `chunkDialogueText`).
+      const summary = buildDialogueSummary(entries);
 
       const existing = this.readPendingRaw();
       if (summary.trim() === "") {
@@ -226,23 +241,21 @@ export class SleepCycle {
 
   /**
    * Concatena um novo bloco de diálogo ao handoff existente com separador
-   * temporal, respeitando o teto absoluto em BYTES do sintetizador
-   * (`MAX_PROMPT_BYTES`) para nunca estourar o buffer do prompt.
+   * temporal.
+   *
+   * TICKET-DREAMS-08 (Frente 8A): o truncamento por `MAX_PROMPT_BYTES` foi
+   * REMOVIDO. Ele preservava apenas a cauda e descartava silenciosamente as
+   * conversas do início do dia — exatamente a perda que este ticket elimina.
+   * O teto do prompt continua inviolável, mas agora é honrado POR CHUNK no REM
+   * Sleep (`chunkDialogueText` particiona o handoff antes de sintetizar), e o
+   * arquivo de handoff acumula o dia inteiro até ser consumido com sucesso.
    */
   private mergeDialogue(existing: string, incoming: string, capturedIso: string): string {
     const prev = existing.trim();
     const next = incoming.trim();
     if (prev === "") return next;
     if (next === "") return prev;
-    const merged = `${prev}${dialogueAccumulationSeparator(capturedIso)}${next}`;
-    if (utf8ByteLength(merged) <= MAX_PROMPT_BYTES) return merged;
-    // Teto do sintetizador: preserva a CAUDA (diálogo mais recente), a mesma
-    // política de `buildCappedPrompt`, para nunca exceder 128 KiB.
-    console.warn(
-      `[Light Sleep] Handoff acumulado excede ${MAX_PROMPT_BYTES} bytes; ` +
-        "preservando a cauda mais recente."
-    );
-    return truncateUtf8Tail(merged, MAX_PROMPT_BYTES);
+    return `${prev}${dialogueAccumulationSeparator(capturedIso)}${next}`;
   }
 
   /**
@@ -257,13 +270,16 @@ export class SleepCycle {
       // Sem handoff em disco: lê o opencode.db diretamente, mas SOMENTE o
       // diálogo posterior à última síntese consolidada (`last_synthesized_at`),
       // evitando re-sintetizar conteúdo já processado (Frente 2A/C3).
+      // TICKET-DREAMS-08 (Frente 8A): leitura COMPLETA (sem truncamento) — o
+      // particionamento em chunks é feito pelo próprio remSleep.
       const sinceMs = this.checkpointMs("synthesized");
-      return readRecentDialogueSummary({
+      const entries = readRecentDialogues({
         dbPath: this.sessionDbPath,
         ...(sinceMs !== undefined ? { sinceMs } : { hours: this.dialogueHours }),
         includeReasoning: false,
         onError: (error) => console.error("[REM Sleep] session_reader:", error),
       });
+      return buildDialogueSummary(entries);
     } catch (error) {
       console.error("[REM Sleep] Falha ao ler diálogo direto:", error);
       return "";
@@ -361,10 +377,18 @@ export class SleepCycle {
    *
    * Fluxo:
    *  1. consome o diálogo do Light Sleep (`dialogue_pending.txt`);
-   *  2. `synthesizeMemories(dialogue)` → array validado de memórias;
-   *  3. `db.insertMemory(scope, fact, category)` para cada memória;
-   *  4. escreve DREAMS.md e atualiza as projeções (COLLECTIVE/personas);
-   *  5. limpa o handoff apenas se a síntese tiver sucesso.
+   *  2. PARTICIONA o diálogo em chunks sequenciais seguros (`chunkDialogueText`);
+   *  3. `synthesizeMemories(chunk)` para CADA chunk, agregando as memórias;
+   *  4. `db.insertMemory(scope, fact, category)` para cada memória destilada;
+   *  5. escreve DREAMS.md e atualiza as projeções (COLLECTIVE/personas);
+   *  6. limpa o handoff apenas se TODOS os chunks tiverem sido sintetizados.
+   *
+   * TICKET-DREAMS-08 (Frente 8A): a ingestão é INTEGRAL. Dias com >120.000
+   * caracteres são fatiados em múltiplos chunks (manhã, tarde e noite) e cada
+   * bloco é submetido ao sintetizador — nenhuma conversa é descartada pelo
+   * truncamento invertido `[… início do dia omitido]`. Uma falha em QUALQUER
+   * chunk adia a consolidação inteira: o handoff permanece 100% íntegro e o
+   * checkpoint de síntese NÃO avança (sem amnésia parcial, sem dados falsos).
    *
    * Resiliência e anti-mock: sem IA disponível, o ciclo preserva
    * `dialogue_pending.txt` intacto para o próximo ciclo tentar novamente,
@@ -374,37 +398,61 @@ export class SleepCycle {
     console.log("[REM Sleep] Synthesizing memories...");
 
     const dialogue = this.loadPendingDialogue();
-    let newMemories: SynthesizedMemory[] = [];
-    let source: SynthesisSource = "none";
+    const chunks = chunkDialogueText(dialogue);
+    const newMemories: SynthesizedMemory[] = [];
+    const sources: SynthesisSource[] = [];
     let synthError: string | null = null;
     let synthesisSucceeded = false;
 
-    if (dialogue.trim() !== "") {
-      try {
-        const result = await synthesizeMemories(dialogue, {
-          onError: (error) => console.error("[REM Sleep] MimoSynthesizer:", error),
-        });
-        source = result.source;
-        synthError = result.error;
-        for (const mem of result.memories) {
-          this.db.insertMemory(mem.scope, mem.fact, mem.category);
-          newMemories.push(mem);
-        }
-        synthesisSucceeded = true;
-        console.log(
-          `[REM Sleep] Síntese ${source}: ${newMemories.length} memória(s) inserida(s)` +
-            `${result.dropped > 0 ? `, ${result.dropped} descartada(s)` : ""}` +
-            `${result.error ? ` — ${result.error}` : ""}.`
-        );
-      } catch (error) {
-        // Síntese adiada por indisponibilidade de IA: preserva dialogue_pending.txt e não grava dados falsos
-        synthError = error instanceof Error ? error.message : String(error);
-        console.warn(`[REM Sleep] Síntese cognitiva adiada por indisponibilidade de modelo: ${synthError}`);
-      }
-    } else {
+    if (chunks.length === 0) {
       console.log("[REM Sleep] Sem diálogo recente; usando memórias existentes.");
       synthesisSucceeded = true;
+    } else {
+      console.log(
+        `[REM Sleep] Diálogo particionado em ${chunks.length} chunk(s) sequenciais ` +
+          `(${utf8ByteLength(dialogue)} bytes no total).`
+      );
+
+      let completed = 0;
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        try {
+          const result = await synthesizeMemories(chunk, {
+            onError: (error) => console.error("[REM Sleep] MimoSynthesizer:", error),
+          });
+          sources.push(result.source);
+          if (result.error) synthError = result.error;
+          for (const mem of result.memories) {
+            this.db.insertMemory(mem.scope, mem.fact, mem.category);
+            newMemories.push(mem);
+          }
+          completed++;
+          console.log(
+            `[REM Sleep] Chunk ${i + 1}/${chunks.length} (${result.source}): ` +
+              `${result.memories.length} memória(s) inserida(s)` +
+              `${result.dropped > 0 ? `, ${result.dropped} descartada(s)` : ""}` +
+              `${result.error ? ` — ${result.error}` : ""}.`
+          );
+        } catch (error) {
+          // Síntese adiada por indisponibilidade de IA: preserva o handoff
+          // INTEGRAL (nenhum chunk é descartado) e não grava dados falsos.
+          synthError = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[REM Sleep] Síntese adiada no chunk ${i + 1}/${chunks.length} por ` +
+              `indisponibilidade de modelo: ${synthError}`
+          );
+          break;
+        }
+      }
+
+      // Só há sucesso quando TODOS os chunks foram processados: um único chunk
+      // adiado mantém o pendente e o checkpoint de síntese intactos para uma
+      // próxima tentativa integral.
+      synthesisSucceeded = completed === chunks.length;
     }
+
+    // Fonte reportada: a do último chunk concluído (ou "none" sem diálogo).
+    const source: SynthesisSource = sources.length > 0 ? sources[sources.length - 1] : "none";
 
     const allMemories = this.db.getAllMemories();
 
@@ -515,6 +563,68 @@ export class SleepCycle {
     this.updateProjections();
   }
 
+  /**
+   * Escrita ATÔMICA POSIX de uma projeção markdown.
+   *
+   * TICKET-DREAMS-09 (Frente A): leitores concorrentes (injeção no system
+   * prompt, `dream_recall`, leitura humana) JAMAIS podem observar um arquivo
+   * vazio ou parcialmente escrito. O padrão é o clássico *write-temp +
+   * rename(2)*: o conteúdo é gravado num arquivo temporário no MESMO diretório
+   * (mesmo filesystem ⇒ `rename` é atômico) e só então movido por cima do
+   * destino. `rename(2)` substitui o alvo de forma indivisível: ou o leitor vê
+   * a versão antiga inteira, ou a nova inteira — nunca um `size 0`.
+   *
+   * O `fsync` antes do rename garante que os bytes estejam no disco antes de o
+   * nome ser trocado (durabilidade), e o `unlink` de fallback limpa o
+   * temporário se algo falhar no meio do caminho (sem deixar lixo no diretório).
+   *
+   * Fail-soft NÃO se aplica aqui: a exceção propaga para o chamador decidir
+   * (o ciclo Dreams é resiliente a nível de `runConsolidation`).
+   */
+  private writeFileAtomicSync(filePath: string, content: string): void {
+    const dir = path.dirname(filePath);
+    const base = path.basename(filePath);
+    // Nome temporário único: PID + timestamp + sufixo aleatório evitam colisão
+    // entre escritas concorrentes (processos distintos ou ciclos sobrepostos).
+    const tmpPath = path.join(
+      dir,
+      `${base}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
+    );
+    const data = Buffer.from(content, "utf8");
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(tmpPath, "w", 0o644);
+      fs.writeSync(fd, data);
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = null;
+      fs.renameSync(tmpPath, filePath);
+    } catch (error) {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          /* fd já fechado / inválido */
+        }
+      }
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        /* temporário inexistente ou já renomeado */
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * TICKET-DREAMS-09 (Frente A): projeção em disco das memórias consolidadas.
+   *
+   * PÚBLICO por contrato: além de fechar o `deepSleep()` (pós-poda), pode ser
+   * disparado diretamente pelo CLI e por outros chamadores que precisem
+   * materializar `COLLECTIVE_MEMORY.md` e `personas/*.md` sob demanda, sem
+   * esperar o ciclo noturno. Toda escrita é atômica (write-temp + rename),
+   * garantindo que nenhum leitor concorrente encontre arquivo vazio (size 0).
+   */
   public updateProjections() {
     // 1. Collective memory (top 20 items mais relevantes por score)
     const collective = this.db.getMemoriesByScope("collective", 20);
@@ -522,7 +632,7 @@ export class SleepCycle {
     collective.forEach(m => {
       colContent += `- [${m.category.toUpperCase()}] ${m.fact}\n`;
     });
-    fs.writeFileSync(path.join(this.collectiveDir, "COLLECTIVE_MEMORY.md"), colContent);
+    this.writeFileAtomicSync(path.join(this.collectiveDir, "COLLECTIVE_MEMORY.md"), colContent);
 
     // 2. Persona memories
     const all = this.db.getAllMemories();
@@ -540,7 +650,7 @@ export class SleepCycle {
       pMemories.forEach(m => {
         pContent += `- [${m.category.toUpperCase()}] ${m.fact}\n`;
       });
-      fs.writeFileSync(path.join(this.personasDir, `${agent}.md`), pContent);
+      this.writeFileAtomicSync(path.join(this.personasDir, `${agent}.md`), pContent);
     }
 
     // TICKET-DREAMS-02 (Frente 2B/C4): expurgo determinístico de personas órfãs.

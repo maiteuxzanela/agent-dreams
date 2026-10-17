@@ -29,16 +29,16 @@ Diferente de sistemas rudimentares que apenas salvam logs de telemetria ("sessã
 ┌────────────────────────────────────────────────────────────────────────┐
 │                       FASE 2: REM SLEEP (Destilação)                   │
 │  • Prompt cognitivo estruturado (extrai apenas lições com valor futuro)│
-│  • Cascata: 1º Mimo 2.6 Flash Free ──(fallback)──> 2º Gemini 3.8 Flash │
+│  • Cascata: 1º Mimo v2.6 Flash (default) ──> 2º Gemini 3.8 Flash       │
 │  • Sem IA disponível? Lança erro explícito e preserva o handoff        │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │ (memórias persistidas no DreamsDB)
                                    ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                       FASE 3: DEEP SLEEP (Decaimento & Projeção)       │
-│  • Curva de esquecimento de Ebbinghaus: Score = (Base + Recalls) * e^kt│
-│  • Reforço de sinapses para memórias consultadas ou repetidas          │
-│  • Poda automática de itens com score < 0.20                           │
+│  • Ebbinghaus amortecido: Score = (base + U) · e^(-λ·Δt·decay)         │
+│  • Uso efetivo sublinear: U = ln(1+recall) + 0.5·min(conf, 10)         │
+│  • Poda automática de itens com score < 0.50                           │
 │  • Exporta Top 20: COLLECTIVE_MEMORY.md e personas/<agente>.md         │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -122,8 +122,16 @@ LLM externa.
 * **Política Anti-Falsificação:** Se nenhum modelo de IA estiver disponível ou em modo `DREAMS_OFFLINE=1`, o sistema **não inventa fatos**. Ele emite um erro explícito e mantém `dialogue_pending.txt` intacto no disco para reprocessar na noite seguinte.
 
 ### 3. Deep Sleep (`src/core/sleep_cycle.ts`)
-* Aplica decaimento temporal exponencial baseado no tempo desde o último reforço (`last_reinforced`):
-  $$\text{Score} = (1.0 + \text{recall\_count} + \text{confirmations}) \times e^{-\lambda \times \Delta t \times \text{decay\_weight}}$$
+* Aplica decaimento temporal exponencial baseado no tempo desde o último reforço (`last_reinforced`, com fallback em `created_at`), com **amortecimento sublinear (logarítmico) do uso** — repetições triviais não inflam o score linearmente:
+
+  $$\text{Score} = \Big(\text{base\_weight} + \underbrace{\ln(1 + \text{recall\_count}) + 0.5 \cdot \min(\text{confirmations},\,10)}_{\text{uso efetivo } U \text{ (sublinear)}}\Big) \times e^{-\lambda \cdot \Delta t \cdot \text{decay\_weight}}$$
+
+  onde:
+  * `base_weight` — viés de retenção por categoria: `preference` 2.5, `decision` 2.0, `pitfall` 1.8, `learning` 1.0;
+  * `decay_weight` — multiplicador da taxa de decaimento por categoria: `preference` 0.1, `decision` 0.3, `pitfall` 0.5, `learning` 1.0;
+  * `λ = 0.05` (por dia) e `Δt` em dias desde o último reforço;
+  * `confirmations` satura em `min(confirmations, 10)` (`MAX_CONFIRMATIONS`), cada confirmação pesando `0.5`;
+  * a **poda automática** remove a memória quando `Score < 0.50` (limiar de arquivamento).
 * Atualiza os arquivos de projeção em disco com as **Top 20 memórias** mais pontuadas:
   * `~/.config/opencode/dreams/collective/COLLECTIVE_MEMORY.md`
   * `~/.config/opencode/dreams/personas/<agente>.md`
@@ -232,7 +240,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 Environment="HOME=%h"
-Environment="PATH=%h/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=%h/.opencode/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin"
 # OPENCODE_MODEL NÃO é lido pelo plugin (ver "Override de Modelos"); a cascata
 # padrão (Mimo -> Gemini 3.8 Flash) já é usada sem nenhum env de modelo.
 Environment="DREAMS_MIMO_TIMEOUT_MS=180000"
@@ -308,9 +316,14 @@ bun run src/cli.ts forget 42
 ```
 
 > `forget` imprime a memória removida e retorna código de saída `1` quando o ID
-> é inválido ou inexistente. `list` aceita `--scope <scope>`/`--scope=<scope>` e
-> `--limit <n>`/`--limit=<n>` (default `20`); sem memórias, imprime
-> `No memories found.`.
+> é inválido ou inexistente. Após a exclusão no SQLite, ele **regenera imediatamente
+> as projeções em disco** (`COLLECTIVE_MEMORY.md` e `personas/*.md`, além do expurgo
+> de personas órfãs), eliminando a "memória zumbi" que continuaria sendo injetada no
+> system prompt até o próximo Deep Sleep. `list` aceita `--scope <scope>`/`--scope=<scope>`
+> e `--limit <n>`/`--limit=<n>` (default `20`); sem memórias, imprime
+> `No memories found.`. A filtragem e a paginação ocorrem **dentro do SQLite**
+> (`ORDER BY score DESC, last_reinforced DESC LIMIT ?`), sem materializar a tabela
+> inteira em memória.
 
 ---
 

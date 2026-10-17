@@ -268,6 +268,13 @@ export class DreamsDB {
         // Promove o registro individual para 'collective' herdando, sem
         // reinventar, o score e as confirmações já acumulados.
         this.db.run("UPDATE memories SET scope = 'collective' WHERE id = ?", [promotedId]);
+        // TICKET-DREAMS-07B: a promoção Persona ➔ Coletivo também CONFIRMA a
+        // memória — incrementa `confirmations + 1` (teto MAX_CONFIRMATIONS),
+        // aplica o bônus de score (+0.5, teto MAX_SCORE) e atualiza
+        // `last_reinforced = now`, respeitando `reinforce: false`.
+        if (shouldReinforce) {
+          this.reinforceMemory(promoted, now);
+        }
         // Arranca as demais cópias equivalentes (evita dupla injeção no prompt).
         for (const dup of personaMatches.slice(1)) {
           if (typeof dup.id === "number") this.deleteMemory(dup.id);

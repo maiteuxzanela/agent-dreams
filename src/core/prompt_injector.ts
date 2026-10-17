@@ -98,6 +98,61 @@ const MAX_FILE_READ_BYTES = 4 * 1024 * 1024;
 /** Tabelas consultadas (whitelist fixa — nomes NUNCA vêm do usuário). */
 const AGENT_TABLES = ["session", "session_v2"] as const;
 
+/**
+ * TICKET-DREAMS-09 (Frente B) — TTL do cache em memória de resolução de agente.
+ *
+ * 60 s é curto o bastante para que uma persona recém-atribuída a uma sessão
+ * apareça no próximo minuto, e longo o bastante para que uma rajada de
+ * mensagens do mesmo chat NÃO abra/feche o SQLite a cada turno.
+ */
+export const AGENT_SESSION_CACHE_TTL_MS = 60_000;
+
+/** Entrada do cache: agente resolvido (ou `null`) + instante de expiração. */
+interface AgentSessionCacheEntry {
+  agent: string | null;
+  expiresAt: number;
+}
+
+/**
+ * Cache em memória, por sessão, do agente resolvido via SQLite.
+ *
+ * Evita que cada mensagem de chat reabra o banco (`new Database` + `close`) na
+ * thread principal quando o agente já foi descoberto — o gargalo real é o
+ * ciclo open/close concorrente do SQLite, não a query em si. O `null` também é
+ * cacheado (sessão ainda não persistida no banco) para não martelar o disco a
+ * cada turno; expira em `AGENT_SESSION_CACHE_TTL_MS`.
+ */
+const agentSessionCache = new Map<string, AgentSessionCacheEntry>();
+
+/**
+ * Limpa o cache em memória de resolução de agente.
+ *
+ * EXPORTADO PARA TESTES: permite forçar uma releitura fresca do SQLite entre
+ * casos, sem depender do relógio nem da expiração natural do TTL.
+ */
+export function clearAgentSessionCache(): void {
+  agentSessionCache.clear();
+}
+
+/** Consulta o cache; entrada expirada é descartada (lazy eviction). */
+function readCachedAgent(sessionID: string): { hit: boolean; agent: string | null } {
+  const entry = agentSessionCache.get(sessionID);
+  if (!entry) return { hit: false, agent: null };
+  if (entry.expiresAt <= Date.now()) {
+    agentSessionCache.delete(sessionID);
+    return { hit: false, agent: null };
+  }
+  return { hit: true, agent: entry.agent };
+}
+
+/** Grava no cache com TTL renovado a partir de agora. */
+function writeCachedAgent(sessionID: string, agent: string | null): void {
+  agentSessionCache.set(sessionID, {
+    agent,
+    expiresAt: Date.now() + AGENT_SESSION_CACHE_TTL_MS,
+  });
+}
+
 /** Raiz padrão das memórias Dreams. */
 export function defaultDreamsDir(): string {
   return path.join(os.homedir(), ".config", "opencode", "dreams");
@@ -406,7 +461,7 @@ async function readAgentViaClient(sessionID: string, client: any): Promise<strin
  *
  * Nunca lança: banco ausente/bloqueado/corrompido → `null`.
  */
-function readAgentViaDb(sessionID: string, dbPath?: string): string | null {
+function readAgentViaDbUncached(sessionID: string, dbPath?: string): string | null {
   const finalPath = dbPath || defaultSessionDbPath();
   if (!finalPath || !fs.existsSync(finalPath)) return null;
 
@@ -471,6 +526,32 @@ function readAgentViaDb(sessionID: string, dbPath?: string): string | null {
     } catch {
       /* já fechado / nunca aberto */
     }
+  }
+}
+
+/**
+ * TICKET-DREAMS-09 (Frente B) — `readAgentViaDb` com cache em memória por sessão.
+ *
+ * Envelope fino sobre `readAgentViaDbUncached`: consulta o cache (TTL de
+ * `AGENT_SESSION_CACHE_TTL_MS`) e só abre o SQLite em caso de miss. Resultados
+ * positivos E negativos (`null`) são memorizados — uma sessão cujo agente já
+ * foi resolvido não reabre o banco a cada mensagem de chat, e uma sessão ainda
+ * não persistida não martela o disco por 60 s.
+ *
+ * O cache é chaveado por `sessionID` (o `dbPath` de produção é sempre o
+ * canônico `defaultSessionDbPath()`); `clearAgentSessionCache()` força releitura.
+ * Nunca lança: qualquer erro interno degrada para `null` (fail-soft herdado).
+ */
+function readAgentViaDb(sessionID: string, dbPath?: string): string | null {
+  try {
+    const cached = readCachedAgent(sessionID);
+    if (cached.hit) return cached.agent;
+
+    const resolved = readAgentViaDbUncached(sessionID, dbPath);
+    writeCachedAgent(sessionID, resolved);
+    return resolved;
+  } catch {
+    return null;
   }
 }
 

@@ -22,15 +22,34 @@ const DREAMS_DIR = path.join(os.homedir(), ".config", "opencode", "dreams");
 // devolve uma referência a uma conexão já fechada ("database is closed").
 let dbInstance: DreamsDB | null = null;
 
+// TICKET-DREAMS-07B: caminho efetivamente ligado ao `dbInstance` vivo.
+// `null` representa o caminho DEFAULT (quando `getDB()` é chamado sem
+// argumento). Rastreá-lo permite que um novo `dbPath` EXPLÍCITO e diferente
+// force o fechamento da conexão atual e a reabertura no caminho pedido —
+// antes o argumento era silenciosamente ignorado após a 1ª abertura.
+let currentDbPath: string | null = null;
+
 /**
  * Retorna a conexão única com o `DreamsDB`, abrindo-a sob demanda.
  *
- * @param dbPath Caminho opcional do banco (usado apenas na 1ª abertura e por
- *               testes determinísticos isolados; produção usa o default).
+ * @param dbPath Caminho opcional do banco. Se um caminho explícito DIFERENTE do
+ *               que está ligado à conexão viva for passado, a conexão atual é
+ *               fechada e reaberta no novo caminho (isolação em testes
+ *               determinísticos). Produção usa o default.
  */
 export function getDB(dbPath?: string): DreamsDB {
+  if (dbPath !== undefined && dbPath !== currentDbPath) {
+    if (dbInstance) {
+      // Fecha e zera o singleton com segurança antes de reabrir no novo path.
+      closeDB();
+    }
+    dbInstance = new DreamsDB(dbPath);
+    currentDbPath = dbPath;
+    return dbInstance;
+  }
   if (!dbInstance) {
     dbInstance = new DreamsDB(dbPath);
+    currentDbPath = dbPath ?? null;
   }
   return dbInstance;
 }
@@ -44,6 +63,9 @@ export function closeDB(): void {
   // Zera ANTES de fechar: mesmo que `close()` lance, o singleton não fica
   // apontando para uma conexão morta e o próximo `getDB()` reabre limpo.
   dbInstance = null;
+  // TICKET-DREAMS-07B: zera também o caminho rastreado, para que a próxima
+  // abertura (com ou sem argumento) seja tratada como inicialização limpa.
+  currentDbPath = null;
   if (!current) return;
   try {
     current.close();

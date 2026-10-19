@@ -81,8 +81,16 @@ export interface SessionReaderOptions {
   sinceMs?: number;
   /** Limite superior absoluto em epoch ms (padrão: agora). */
   untilMs?: number;
-  /** Máximo de mensagens retornadas (padrão: 500). */
-  limit?: number;
+  /**
+   * Máximo de mensagens retornadas.
+   *
+   * OPCIONAL: quando omitido (ou `null`, `0` ou `Infinity`), a consulta SQL
+   * NÃO aplica cláusula `LIMIT` — leitura irrestrita de TODAS as mensagens da
+   * janela `[since, until]`, em ordem cronológica ascendente. Apenas um número
+   * positivo e finito ativa o teto compatível (ordenação decrescente + LIMIT,
+   * depois revertida para cronológica), retendo as mensagens mais recentes.
+   */
+  limit?: number | null;
   /** Incluir partes `reasoning` além das `text`. Padrão: true. */
   includeReasoning?: boolean;
   /** Filtrar por papel específico (padrão: todos). */
@@ -171,7 +179,15 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
   const hours = options.hours ?? 24;
   const until = options.untilMs ?? Date.now();
   const since = options.sinceMs ?? until - hours * 60 * 60 * 1000;
-  const limit = Math.max(1, options.limit ?? 500);
+  // TICKET-HARNESS-60: sem teto forçado. Só há LIMIT quando o chamador pede um
+  // número positivo e finito; omitido/null/0/Infinity significa leitura
+  // irrestrita de todas as mensagens da janela.
+  const requestedLimit = options.limit;
+  const hasFiniteLimit =
+    typeof requestedLimit === "number" &&
+    Number.isFinite(requestedLimit) &&
+    requestedLimit > 0;
+  const limit = hasFiniteLimit ? Math.floor(requestedLimit as number) : null;
   const includeReasoning = options.includeReasoning ?? true;
   const maxTextLength = options.maxTextLength ?? 4000;
   const excludeSessionTitles = options.excludeSessionTitles ?? DEFAULT_EXCLUDED_SESSION_TITLES;
@@ -200,9 +216,19 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
         ? `AND m.session_id NOT IN (${excludedSessionIds.map(() => "?").join(",")})`
         : "";
 
-    // 1) Mensagens da janela. Busca em ordem DECRESCENTE + LIMIT para reter as
-    //    mais RECENTES quando a janela excede o limite, depois inverte para
-    //    devolver a lista em ordem cronológica de leitura.
+    // 1) Mensagens da janela.
+    //    - Sem limite (omitido/null/0/Infinity): leitura IRRESTRITA, ordenada
+    //      cronologicamente de forma ascendente, sem cláusula LIMIT.
+    //    - Com limite positivo finito (compatibilidade): busca em ordem
+    //      DECRESCENTE + LIMIT para reter as mais RECENTES quando a janela
+    //      excede o teto, depois inverte para a ordem cronológica de leitura.
+    const orderClause = hasFiniteLimit
+      ? "ORDER BY m.time_created DESC, m.id DESC\n          LIMIT ?"
+      : "ORDER BY m.time_created ASC, m.id ASC";
+    const queryParams: (string | number)[] = hasFiniteLimit
+      ? [since, until, ...excludedSessionIds, limit as number]
+      : [since, until, ...excludedSessionIds];
+
     const messages = db
       .query<
         {
@@ -218,11 +244,10 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
            FROM message m
           WHERE m.time_created >= ? AND m.time_created <= ?
                 ${exclusionClause}
-          ORDER BY m.time_created DESC, m.id DESC
-          LIMIT ?`
+          ${orderClause}`
       )
-      .all(since, until, ...excludedSessionIds, limit);
-    messages.reverse();
+      .all(...queryParams);
+    if (hasFiniteLimit) messages.reverse();
 
     if (messages.length === 0) return [];
 

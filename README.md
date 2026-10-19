@@ -151,7 +151,7 @@ Clone o repositório diretamente na pasta de plugins do seu usuário OpenCode:
 ```bash
 mkdir -p ~/.config/opencode/plugins
 cd ~/.config/opencode/plugins
-git clone https://github.com/maiteuxzanela/chamber_dream.git opencode-plugin-dreams
+git clone https://github.com/maiteuxzanela/agent-dreams.git opencode-plugin-dreams
 cd opencode-plugin-dreams
 bun install
 ```

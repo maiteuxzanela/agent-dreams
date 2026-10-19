@@ -29,7 +29,7 @@ Diferente de sistemas rudimentares que apenas salvam logs de telemetria ("sessã
 ┌────────────────────────────────────────────────────────────────────────┐
 │                       FASE 2: REM SLEEP (Destilação)                   │
 │  • Prompt cognitivo estruturado (extrai apenas lições com valor futuro)│
-│  • Cascata: 1º Mimo v2.6 Flash (default) ──> 2º Gemini 3.8 Flash       │
+│  • Cascata: 1º Gemini 3.8 Flash ──> 2º Mimo v2.6 Flash ──> 3º DeepSeek │
 │  • Sem IA disponível? Lança erro explícito e preserva o handoff        │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │ (memórias persistidas no DreamsDB)
@@ -117,8 +117,9 @@ LLM externa.
 ### 2. REM Sleep (`src/core/mimo_synthesizer.ts`)
 * Processa o texto com destilador cognitivo que devolve um array JSON de memórias atômicas.
 * **Cascata Resiliente de Modelos:**
-  1. `opencode/mimo-v2.6-flash-free` (prioridade 100% gratuita).
-  2. `google/antigravity-gemini-3.8-flash` (variant: `low`, acionado em caso de erro de cota ou indisponibilidade do Mimo).
+  1. `google/antigravity-gemini-3.8-flash` (prioridade da cota Antigravity).
+  2. `opencode/mimo-v2.6-flash-free` (degrau gratuito de fallback).
+  3. `opencode-go/deepseek-v4.1-flash` (terceiro degrau de contingência).
 * **Política Anti-Falsificação:** Se nenhum modelo de IA estiver disponível ou em modo `DREAMS_OFFLINE=1`, o sistema **não inventa fatos**. Ele emite um erro explícito e mantém `dialogue_pending.txt` intacto no disco para reprocessar na noite seguinte.
 
 ### 3. Deep Sleep (`src/core/sleep_cycle.ts`)
@@ -159,9 +160,10 @@ bun install
 
 #### A. Override de Modelos e Variáveis de Ambiente (Opcional)
 
-Por padrão, o sintetizador usa a cascata gratuita:
-* Principal: `opencode/mimo-v2.6-flash-free`
-* Fallback: `google/antigravity-gemini-3.8-flash` (variant `low`)
+Por padrão, o sintetizador usa a cascata resiliente:
+* Principal: `google/antigravity-gemini-3.8-flash`
+* Fallback: `opencode/mimo-v2.6-flash-free`
+* Terciário: `opencode-go/deepseek-v4.1-flash`
 
 O override real de modelo **não é feito por variável de ambiente**. A resolução
 ocorre na construção do `MimoSynthesizer` (`src/core/mimo_synthesizer.ts`) e pode
@@ -169,16 +171,17 @@ ser alterada por duas vias:
 
 **1. Constantes de módulo** (afeta todo o plugin):
 ```typescript
-export const DEFAULT_MIMO_MODEL = "opencode/mimo-v2.6-flash-free";
-export const DEFAULT_FALLBACK_MODEL = "google/antigravity-gemini-3.8-flash";
+export const DEFAULT_MIMO_MODEL = "google/antigravity-gemini-3.8-flash";
+export const DEFAULT_FALLBACK_MODEL = "opencode/mimo-v2.6-flash-free";
+export const DEFAULT_TERTIARY_MODEL = "opencode-go/deepseek-v4.1-flash";
 ```
 
 **2. Opções do construtor** (`MimoSynthesizerOptions`), quando você instancia o
 sintetizador diretamente:
 ```typescript
 new MimoSynthesizer({
-  model: "opencode/mimo-v2.6-flash-free",   // 1º alvo
-  fallbackModel: "google/antigravity-gemini-3.8-flash", // 2º alvo
+  model: "google/antigravity-gemini-3.8-flash",   // 1º alvo
+  fallbackModel: "opencode/mimo-v2.6-flash-free", // 2º alvo
   // ou uma lista completa em ordem de tentativa:
   // models: ["provider/a", "provider/b"],
 });
@@ -375,7 +378,7 @@ Type=oneshot
 Environment="HOME=%h"
 Environment="PATH=%h/.opencode/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin"
 # OPENCODE_MODEL NÃO é lido pelo plugin (ver "Override de Modelos"); a cascata
-# padrão (Mimo -> Gemini 3.8 Flash) já é usada sem nenhum env de modelo.
+# padrão (Gemini 3.8 Flash -> Mimo -> DeepSeek) já é usada sem nenhum env de modelo.
 Environment="DREAMS_MIMO_TIMEOUT_MS=180000"
 Environment="OLLAMA_HOST=127.0.0.1:99999"
 Environment="CUDA_VISIBLE_DEVICES="

@@ -295,8 +295,8 @@ describe("prompt_injector — extractAgentFromTitle (função pura)", () => {
     expect(extractAgentFromTitle("reviewer (@reviewer colega)")).toBeNull();
   });
 
-  test("case-insensitive nos papéis: '@KaEL SUBAGENT' → 'KaEL' normalizado", () => {
-    expect(extractAgentFromTitle("sessão (@KaEL SUBAGENT)")).toBe("KaEL");
+  test("case-insensitive nos papéis: '@AlIcE SUBAGENT' → 'AlIcE' normalizado", () => {
+    expect(extractAgentFromTitle("sessão (@AlIcE SUBAGENT)")).toBe("AlIcE");
   });
 });
 

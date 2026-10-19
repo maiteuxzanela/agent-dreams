@@ -72,7 +72,7 @@ export function resolveOpencodeBinaryPath(explicit?: string): string {
 /**
  * Modelo padrão principal de destilação.
  *
- * Prioridade da cota gratuita Antigravity da usuária (`google/antigravity-gemini-3.8-flash`)
+ * Prioridade da cota gratuita Antigravity do operador (`google/antigravity-gemini-3.8-flash`)
  * porque o Mimo está sem cota. Nunca deepseek/ollama.
  */
 export const DEFAULT_MIMO_MODEL = "google/antigravity-gemini-3.8-flash";
@@ -83,7 +83,7 @@ export const DEFAULT_FALLBACK_MODEL = "opencode/mimo-v2.6-flash-free";
 /**
  * Modelo terciário de fallback na cascata de destilação.
  *
- * Último degrau de resiliência: usa a cota `opencode-go` da usuária
+ * Último degrau de resiliência: usa a cota `opencode-go` do operador
  * (`opencode-go/deepseek-v4.1-flash`) apenas quando as opções gratuitas
  * (Antigravity/Mimo) falharem ou esgotarem cota.
  */

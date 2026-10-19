@@ -249,7 +249,7 @@ compartilhando o mesmo banco SQLite e as mesmas regras de memória:
 | Entrypoint | Quando usar | Como iniciar |
 |---|---|---|
 | **Plugin nativo OpenCode** | Sessões do OpenCode (tools `dream_learn`/`dream_recall` no runtime) | Registro no `opencode.json` (ver acima) |
-| **MCP Server universal** | Claude Desktop, Cursor, Windsurf e qualquer cliente MCP | `bunx --bun dreams-mcp` (transporte **stdio**) |
+| **MCP Server universal** | Claude Desktop, Cursor, Windsurf e qualquer cliente MCP | `bun /caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js` (transporte **stdio**) |
 
 ### 1. Plugin nativo OpenCode
 
@@ -265,15 +265,19 @@ newline-delimited sobre stdio**: `stdout` é exclusivo do protocolo e os logs v�
 para `stderr`.
 
 ```bash
-# Forma recomendada (Bun já resolve o shebang)
-bunx --bun dreams-mcp
+# Checkout local — forma executável hoje (o pacote ainda não está publicado no npm)
+bun /caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js
 
-# Via npx — requer Bun instalado e no PATH (o shebang é `#!/usr/bin/env bun`)
-npx dreams-mcp
-
-# A partir de um checkout local
-bun ./bin/dreams-mcp.js
+# Após publicar o pacote `opencode-plugin-dreams` no npm
+bunx --bun opencode-plugin-dreams
+# ou, explicitando o bin `dreams-mcp` do pacote:
+bunx -p opencode-plugin-dreams dreams-mcp
 ```
+
+> ⚠️ **O pacote `opencode-plugin-dreams` ainda não está publicado no npm.** Por
+> isso `bunx`/`npx` com o nome do pacote só funcionam **após a publicação**.
+> Enquanto isso, use o caminho absoluto do checkout local. O nome `dreams-mcp`
+> é o **bin** exposto pelo pacote — não é um pacote npm autônomo.
 
 #### Tools MCP expostas
 
@@ -307,12 +311,15 @@ no macOS ou `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
 {
   "mcpServers": {
     "dreams": {
-      "command": "bunx",
-      "args": ["--bun", "dreams-mcp"]
+      "command": "bun",
+      "args": ["/caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js"]
     }
   }
 }
 ```
+
+> Substitua `/caminho/absoluto/para/opencode-plugin-dreams` pelo caminho real do
+> seu checkout (ex.: `~/.config/opencode/plugins/opencode-plugin-dreams`).
 
 **Cursor** (`~/.cursor/mcp.json` ou `.cursor/mcp.json` na raiz do projeto):
 
@@ -320,10 +327,10 @@ no macOS ou `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
 {
   "mcpServers": {
     "dreams": {
-      "command": "bunx",
-      "args": ["--bun", "dreams-mcp"],
+      "command": "bun",
+      "args": ["/caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js"],
       "env": {
-        "DREAMS_DIR": "~/.config/opencode/dreams"
+        "DREAMS_DIR": "/home/SEU_USUARIO/.config/opencode/dreams"
       }
     }
   }
@@ -336,16 +343,19 @@ no macOS ou `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
 {
   "mcpServers": {
     "dreams": {
-      "command": "bunx",
-      "args": ["--bun", "dreams-mcp"]
+      "command": "bun",
+      "args": ["/caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js"]
     }
   }
 }
 ```
 
-> 💡 Se preferir `npx`, troque `"command": "bunx", "args": ["--bun", "dreams-mcp"]`
-> por `"command": "npx", "args": ["-y", "dreams-mcp"]` — o pacote continua
-> exigindo o Bun disponível no `PATH` por causa do shebang.
+> 💡 **Após publicar o pacote no npm**, os snippets podem usar
+> `"command": "bunx", "args": ["--bun", "opencode-plugin-dreams"]`
+> (ou `"command": "npx", "args": ["-y", "opencode-plugin-dreams"]`). O Bun
+> precisa estar no `PATH` por causa do shebang `#!/usr/bin/env bun`.
+> **Antes da publicação, use o caminho absoluto local** — comandos com o nome
+> `dreams-mcp` não funcionam como pacote npm.
 
 ---
 

@@ -5,7 +5,9 @@ import { Database } from "bun:sqlite";
 import { createOpencodeClient } from "@opencode-ai/sdk";
 import {
   MAX_MEMORY_LINES,
+  MAX_MEMORY_TOKENS,
   MAX_MEMORY_CHARS,
+  CHARS_PER_TOKEN,
   ANTI_DUMP_NOTICE_MARKER,
   INJECTION_HEADER,
   COLLECTIVE_SECTION_HEADER,
@@ -442,18 +444,55 @@ describe("prompt_injector — payload do cliente com título do Ensemble (HTTP r
 });
 
 // ---------------------------------------------------------------------------
-// 5. Truncamento anti-dumping (teto de 150 linhas / 8000 chars)
+// 5. Truncamento anti-dumping (teto de MAX_MEMORY_LINES linhas / MAX_MEMORY_CHARS)
 // ---------------------------------------------------------------------------
 describe("prompt_injector — truncamento anti-dumping", () => {
   beforeEach(() => resetDreamsDir());
 
-  test("applyAntiDumpLimit trunca arquivo com 500 linhas e anexa o aviso", () => {
-    const result = applyAntiDumpLimit(makeLines(500));
+  test("constantes canônicas: 500 linhas / 10000 tokens / 40000 chars", () => {
+    // Contrato do card: o teto anti-dumping foi ampliado de 150/2000 para 500/10000.
+    expect(MAX_MEMORY_LINES).toBe(500);
+    expect(MAX_MEMORY_TOKENS).toBe(10000);
+    expect(CHARS_PER_TOKEN).toBe(4);
+    expect(MAX_MEMORY_CHARS).toBe(40000);
+    expect(MAX_MEMORY_CHARS).toBe(MAX_MEMORY_TOKENS * CHARS_PER_TOKEN);
+  });
+
+  test("applyAntiDumpLimit trunca arquivo MUITO acima do teto e anexa o aviso", () => {
+    const totalLines = MAX_MEMORY_LINES * 2; // 1000 linhas: acima do novo teto de 500
+    const result = applyAntiDumpLimit(makeLines(totalLines));
     expect(result.truncated).toBe(true);
     expect(result.text).toContain(ANTI_DUMP_NOTICE_MARKER);
     expect(result.text.split("\n").length).toBeLessThanOrEqual(MAX_MEMORY_LINES + 3);
-    expect(result.text).not.toContain("Linha 500 da memoria consolidada");
+    expect(result.text).not.toContain(`Linha ${totalLines} da memoria consolidada`);
     expect(result.text).toContain("Linha 1 da memoria consolidada");
+    // O aviso dinâmico precisa refletir o NOVO teto, não o antigo (150/2000).
+    expect(result.text).toContain(`teto de ${MAX_MEMORY_LINES} linhas`);
+    expect(result.text).toContain(`~${MAX_MEMORY_TOKENS} tokens`);
+    expect(result.text).not.toContain("teto de 150 linhas");
+    expect(result.text).not.toContain("~2000 tokens");
+  });
+
+  test("applyAntiDumpLimit NÃO trunca conteúdo exatamente no teto de linhas (500)", () => {
+    const result = applyAntiDumpLimit(makeLines(MAX_MEMORY_LINES));
+    expect(result.truncated).toBe(false);
+    expect(result.text).not.toContain(ANTI_DUMP_NOTICE_MARKER);
+    expect(result.text.split("\n").length).toBe(MAX_MEMORY_LINES);
+  });
+
+  test("applyAntiDumpLimit trunca na primeira linha acima do teto (501)", () => {
+    const result = applyAntiDumpLimit(makeLines(MAX_MEMORY_LINES + 1));
+    expect(result.truncated).toBe(true);
+    expect(result.text).toContain(ANTI_DUMP_NOTICE_MARKER);
+    expect(result.text).not.toContain(`Linha ${MAX_MEMORY_LINES + 1} da memoria consolidada`);
+    expect(result.text).toContain(`Linha ${MAX_MEMORY_LINES} da memoria consolidada`);
+  });
+
+  test("applyAntiDumpLimit NÃO trunca 400 linhas (antes truncaria no teto de 150)", () => {
+    const result = applyAntiDumpLimit(makeLines(400));
+    expect(result.truncated).toBe(false);
+    expect(result.text).not.toContain(ANTI_DUMP_NOTICE_MARKER);
+    expect(result.text.split("\n").length).toBe(400);
   });
 
   test("applyAntiDumpLimit preserva conteúdo curto sem truncar nem avisar", () => {
@@ -476,21 +515,32 @@ describe("prompt_injector — truncamento anti-dumping", () => {
     expect(result.text.length).toBeLessThan(MAX_MEMORY_CHARS + 300);
   });
 
-  test("readCollectiveMemory aplica o teto: >150 linhas truncadas com aviso no arquivo real", () => {
-    writeCollective(makeLines(500));
+  test("readCollectiveMemory aplica o teto: >500 linhas truncadas com aviso no arquivo real", () => {
+    const totalLines = MAX_MEMORY_LINES * 2;
+    writeCollective(makeLines(totalLines));
     const content = readCollectiveMemory(DREAMS_TMP);
     expect(content).toBeString();
     expect(content!).toContain(ANTI_DUMP_NOTICE_MARKER);
     expect(content!.split("\n").length).toBeLessThanOrEqual(MAX_MEMORY_LINES + 3);
-    expect(content!).not.toContain("Linha 500 da memoria consolidada");
+    expect(content!).not.toContain(`Linha ${totalLines} da memoria consolidada`);
+  });
+
+  test("readCollectiveMemory NÃO trunca arquivo de 400 linhas (dentro do novo teto)", () => {
+    writeCollective(makeLines(400));
+    const content = readCollectiveMemory(DREAMS_TMP);
+    expect(content).toBeString();
+    expect(content!).not.toContain(ANTI_DUMP_NOTICE_MARKER);
+    expect(content!.split("\n").length).toBe(400);
   });
 
   test("readPersonaMemory também aplica o teto anti-dumping", () => {
-    writePersona("kael", makeLines(400));
+    const totalLines = MAX_MEMORY_LINES + 100;
+    writePersona("kael", makeLines(totalLines));
     const content = readPersonaMemory(DREAMS_TMP, "kael");
     expect(content).toBeString();
     expect(content!).toContain(ANTI_DUMP_NOTICE_MARKER);
     expect(content!.split("\n").length).toBeLessThanOrEqual(MAX_MEMORY_LINES + 3);
+    expect(content!).not.toContain(`Linha ${totalLines} da memoria consolidada`);
   });
 });
 

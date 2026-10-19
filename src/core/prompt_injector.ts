@@ -13,8 +13,8 @@
  * subagent`) tem precedência sobre `session.agent` (herdado do lead).
  *
  * Garantias contratuais:
- *  - ANTI-DUMPING: cada arquivo é limitado a `MAX_MEMORY_LINES` (150) linhas
- *    e `MAX_MEMORY_CHARS` (~2000 tokens); o corte é gracioso e sempre
+ *  - ANTI-DUMPING: cada arquivo é limitado a `MAX_MEMORY_LINES` (500) linhas
+ *    e `MAX_MEMORY_CHARS` (~10000 tokens); o corte é gracioso e sempre
  *    acompanha um aviso legível no próprio bloco.
  *  - FAIL-SAFE ABSOLUTO: nenhuma função deste módulo lança exceção.
  *    `wrapSystemPromptInjection` retorna `null` em QUALQUER erro — o system
@@ -27,15 +27,15 @@ import os from "os";
 import path from "path";
 
 /** Máximo de linhas por arquivo de memória injetado (anti-dumping). */
-export const MAX_MEMORY_LINES = 150;
+export const MAX_MEMORY_LINES = 500;
 
 /** Teto aproximado de tokens por arquivo de memória injetado. */
-export const MAX_MEMORY_TOKENS = 2000;
+export const MAX_MEMORY_TOKENS = 10000;
 
 /** Razão chars/token usada para converter o teto de tokens em caracteres. */
 export const CHARS_PER_TOKEN = 4;
 
-/** Teto absoluto em caracteres (~2000 tokens × 4 chars/token). */
+/** Teto absoluto em caracteres (~10000 tokens × 4 chars/token = 40.000). */
 export const MAX_MEMORY_CHARS = MAX_MEMORY_TOKENS * CHARS_PER_TOKEN;
 
 /** Marcador textual do aviso de truncamento (assertável em testes). */
@@ -254,7 +254,7 @@ function readMemoryFile(filePath: string): string | null {
  * Lê a memória coletiva consolidada (`collective/COLLECTIVE_MEMORY.md`).
  *
  * @param dreamsDir Raiz das memórias Dreams (ex.: `~/.config/opencode/dreams`).
- * @returns Conteúdo (limitado a 150 linhas / ~2000 tokens) ou `null`.
+ * @returns Conteúdo (limitado a 500 linhas / ~10000 tokens) ou `null`.
  */
 export function readCollectiveMemory(dreamsDir: string): string | null {
   try {
@@ -272,7 +272,7 @@ export function readCollectiveMemory(dreamsDir: string): string | null {
  * O `agentName` é validado contra `AGENT_NAME_RE` antes de virar caminho:
  * nomes com `/`, `\` ou iniciados por `.` (traversação) retornam `null`.
  *
- * @returns Conteúdo (limitado a 150 linhas / ~2000 tokens) ou `null`.
+ * @returns Conteúdo (limitado a 500 linhas / ~10000 tokens) ou `null`.
  */
 export function readPersonaMemory(dreamsDir: string, agentName: string): string | null {
   try {

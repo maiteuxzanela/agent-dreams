@@ -1,5 +1,9 @@
 # 🌙 Agent Dreams (`agent-dreams`)
 
+[![npm version](https://img.shields.io/npm/v/agent-dreams.svg?color=cb3837&style=flat-square)](https://www.npmjs.com/package/agent-dreams)
+[![npm downloads](https://img.shields.io/npm/dm/agent-dreams.svg?style=flat-square)](https://www.npmjs.com/package/agent-dreams)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+
 Biblioteca e servidor oficial de **memória contínua, consolidação cognitiva e arquitetura de sono** para o ecossistema de agentes de IA ([OpenCode](https://opencode.ai), Claude Desktop, Cursor, etc.).
 
 O **Agent Dreams** resolve o problema clássico de perda de contexto e amnésia entre sessões de LLM. Inspirado nas neurociências e no ciclo biológico do sono, o sistema ingere passivamente os diálogos reais de trabalho, destila aprendizados preditivos através de modelos cognitivos em nuvem e projeta regras ativas para os agentes operacionais sem sobrecarregar a janela de contexto.

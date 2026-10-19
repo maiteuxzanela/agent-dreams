@@ -17,6 +17,7 @@ import {
   MimoSynthesizer,
   DEFAULT_MIMO_MODEL,
   DEFAULT_FALLBACK_MODEL,
+  DEFAULT_TERTIARY_MODEL,
 } from "../src/core/mimo_synthesizer";
 import fs from "fs";
 import path from "path";
@@ -511,8 +512,9 @@ Essas foram as memórias extraídas.
 
 describe("mimo_synthesizer — Cascata de Modelos, Teto de Diálogo e Resiliência Fail-Fast", () => {
   test("Constantes de modelo padrão respeitam a governança do ecossistema", () => {
-    expect(DEFAULT_MIMO_MODEL).toBe("opencode/mimo-v2.6-flash-free");
-    expect(DEFAULT_FALLBACK_MODEL).toBe("google/antigravity-gemini-3.8-flash");
+    expect(DEFAULT_MIMO_MODEL).toBe("google/antigravity-gemini-3.8-flash");
+    expect(DEFAULT_FALLBACK_MODEL).toBe("opencode/mimo-v2.6-flash-free");
+    expect(DEFAULT_TERTIARY_MODEL).toBe("opencode-go/deepseek-v4.1-flash");
   });
 
   test("synthesizeMemories em modo DREAMS_OFFLINE=1 lança erro explícito sem inventar dados fakes", async () => {
@@ -540,6 +542,49 @@ describe("mimo_synthesizer — Cascata de Modelos, Teto de Diálogo e Resiliênc
     );
   });
 
+  test("Cascata padrão invoca os 3 degraus reais (Antigravity -> Mimo -> opencode-go/deepseek) em ordem", async () => {
+    // Seam real de I/O: binário bash em /tmp registra cada invocação e sai !=0,
+    // forçando o sintetizador a percorrer TODA a cascata padrão. Sem mocks/rede.
+    const recorderDir = fs.mkdtempSync(path.join("/tmp", "dreams_cascade_recorder_"));
+    const callsFile = path.join(recorderDir, "calls.log");
+    const recorderBin = path.join(recorderDir, "opencode_fail.sh");
+    fs.writeFileSync(
+      recorderBin,
+      [
+        "#!/usr/bin/env bash",
+        `printf '%s\\n' "$*" >> "${callsFile}"`,
+        "cat > /dev/null",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+
+    const prevOffline = process.env.DREAMS_OFFLINE;
+    delete process.env.DREAMS_OFFLINE;
+    try {
+      const synth = new MimoSynthesizer({ binary: recorderBin, timeoutMs: 10_000 });
+      await expect(synth.synthesize("user: validando cascata padrão")).rejects.toThrow(
+        "Nenhum modelo de IA disponível para síntese cognitiva"
+      );
+
+      const calls = fs
+        .readFileSync(callsFile, "utf8")
+        .split("\n")
+        .filter(Boolean);
+      expect(calls.length).toBe(3);
+      expect(calls[0]).toContain(`--model ${DEFAULT_MIMO_MODEL}`);
+      expect(calls[1]).toContain(`--model ${DEFAULT_FALLBACK_MODEL}`);
+      expect(calls[2]).toContain(`--model ${DEFAULT_TERTIARY_MODEL}`);
+      // Nenhuma invocação usa `--pure` (bloquearia o plugin de auth do Antigravity).
+      expect(calls.some((c) => c.includes("--pure"))).toBe(false);
+    } finally {
+      if (prevOffline === undefined) delete process.env.DREAMS_OFFLINE;
+      else process.env.DREAMS_OFFLINE = prevOffline;
+      fs.rmSync(recorderDir, { recursive: true, force: true });
+    }
+  });
+
   test("MimoSynthesizer aplica teto de 120.000 caracteres no diálogo com truncamento invertido", async () => {
     const hugeDialogue = "B".repeat(150_000);
     const synth = new MimoSynthesizer({
@@ -553,7 +598,7 @@ describe("mimo_synthesizer — Cascata de Modelos, Teto de Diálogo e Resiliênc
     );
   });
 
-  test("Transport recorder real: --pure em argv e prompt por STDIN, nunca em argv (sem mocks, sem rede)", async () => {
+  test("Transport recorder real: sem --pure em argv e prompt por STDIN, nunca em argv (sem mocks, sem rede)", async () => {
     // Seam legítimo de I/O: um binário REAL em /tmp grava o próprio argv em disco
     // e devolve um JSON de memórias válido. Nenhum mock/stub de módulo é usado.
     const recorderDir = fs.mkdtempSync(path.join("/tmp", "dreams_argv_recorder_"));
@@ -597,14 +642,13 @@ describe("mimo_synthesizer — Cascata de Modelos, Teto de Diálogo e Resiliênc
       expect(result.memories[0].category).toBe("learning");
       expect(result.memories[0].fact).toContain("Transport recorder real");
 
-      // Contrato de entrada: argv SEM o prompt + --pure compulsória (TICKET-DREAMS-01A).
+      // Contrato de entrada: argv SEM o prompt e SEM --pure (TICKET-DREAMS-01A).
       const argv = fs
         .readFileSync(argsFile, "utf8")
         .split("\0")
         .filter(Boolean);
       expect(argv).toEqual([
         "run",
-        "--pure",
         "--title",
         "Dreams Synthesis",
         "--dir",
@@ -612,6 +656,8 @@ describe("mimo_synthesizer — Cascata de Modelos, Teto de Diálogo e Resiliênc
         "--model",
         "opencode/mimo-v2.6-flash-free",
       ]);
+      // `--pure` desativaria o plugin de auth do Antigravity.
+      expect(argv).not.toContain("--pure");
       // NENHUM item de argv carrega o prompt (anti-E2BIG / anti-exposição em /proc).
       expect(argv.some((a) => a.includes("<dialogo>"))).toBe(false);
 

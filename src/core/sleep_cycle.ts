@@ -372,7 +372,7 @@ export class SleepCycle {
   }
 
   /**
-   * REM Sleep: síntese cognitiva via cascata de IA (`opencode run --pure`),
+   * REM Sleep: síntese cognitiva via cascata de IA (`opencode run`),
    * inserção das memórias destiladas no DreamsDB e geração do DREAMS.md.
    *
    * Fluxo:

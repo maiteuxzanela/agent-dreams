@@ -4,11 +4,12 @@
  * Executa a síntese de memórias através do binário nativo do OpenCode CLI
  * em subprocesso com cascata resiliente de modelos na cota gratuita:
  *
- *   1º Alvo: `opencode/mimo-v2.6-flash-free`
- *   2º Alvo (fallback se Mimo falhar/timeout/cota): `google/antigravity-gemini-3.7-flash`
+ *   1º Alvo: `google/antigravity-gemini-3.8-flash` (cota gratuita Antigravity)
+ *   2º Alvo (fallback se Gemini falhar/timeout/cota): `opencode/mimo-v2.6-flash-free`
+ *   3º Alvo (último degrau): `opencode-go/deepseek-v4.1-flash` (cota opencode-go)
  *
  * Comando executado (TICKET-DREAMS-01A — transporte seguro de prompt):
- *   opencode run --pure --title "Dreams Synthesis" --dir /tmp --model <model>
+ *   opencode run --title "Dreams Synthesis" --dir /tmp --model <model>
  *
  * O prompt NÃO trafega em `argv`: ele é escrito no STDIN do subprocesso e o
  * canal é fechado (`stdin.end()`). Isso elimina dois defeitos de runtime POSIX:
@@ -17,7 +18,10 @@
  *     rubrica estourava o limite e abortava a cascata inteira;
  *   - Exposição: o diálogo inteiro ficava visível em claro em `/proc/<pid>/cmdline`.
  * O teto é medido em BYTES UTF-8 reais (`Buffer.byteLength`), nunca em `.length`
- * (UTF-16). A flag `--pure` suprime plugins/sessões recursivas (anti auto-ingestão).
+ * (UTF-16). A flag `--pure` NÃO é usada: ela desativa o plugin de autenticação
+ * `@cortexkit/opencode-antigravity-auth` e bloqueia o provedor
+ * `google/antigravity`, inviabilizando o alvo primário. A blindagem contra
+ * auto-ingestão é feita por `excludeSessionTitles` na camada SQL.
  *
  * Contrato de saída do modelo: EXCLUSIVAMENTE um array JSON de memórias
  *
@@ -65,11 +69,25 @@ export function resolveOpencodeBinaryPath(explicit?: string): string {
   return explicit || process.env.OPENCODE_BIN || "opencode";
 }
 
-/** Modelo padrão principal de destilação (cota gratuita; nunca deepseek/ollama). */
-export const DEFAULT_MIMO_MODEL = "opencode/mimo-v2.6-flash-free";
+/**
+ * Modelo padrão principal de destilação.
+ *
+ * Prioridade da cota gratuita Antigravity da usuária (`google/antigravity-gemini-3.8-flash`)
+ * porque o Mimo está sem cota. Nunca deepseek/ollama.
+ */
+export const DEFAULT_MIMO_MODEL = "google/antigravity-gemini-3.8-flash";
 
-/** Modelo secundário de fallback na cascata de destilação (cota gratuita Antigravity). */
-export const DEFAULT_FALLBACK_MODEL = "google/antigravity-gemini-3.8-flash";
+/** Modelo secundário de fallback na cascata de destilação (cota gratuita Mimo). */
+export const DEFAULT_FALLBACK_MODEL = "opencode/mimo-v2.6-flash-free";
+
+/**
+ * Modelo terciário de fallback na cascata de destilação.
+ *
+ * Último degrau de resiliência: usa a cota `opencode-go` da usuária
+ * (`opencode-go/deepseek-v4.1-flash`) apenas quando as opções gratuitas
+ * (Antigravity/Mimo) falharem ou esgotarem cota.
+ */
+export const DEFAULT_TERTIARY_MODEL = "opencode-go/deepseek-v4.1-flash";
 
 /** Categorias aceitas pelo DreamsDB / dream_learn. */
 export const MEMORY_CATEGORIES = [
@@ -115,10 +133,12 @@ export interface SynthesisResult {
 
 /** Opções do sintetizador. */
 export interface MimoSynthesizerOptions {
-  /** Modelo principal `provider/model`. Padrão: `opencode/mimo-v2.6-flash-free`. */
+  /** Modelo principal `provider/model`. Padrão: `google/antigravity-gemini-3.8-flash`. */
   model?: string;
-  /** Modelo secundário `provider/model`. Padrão: `google/antigravity-gemini-3.7-flash`. */
+  /** Modelo secundário `provider/model`. Padrão: `opencode/mimo-v2.6-flash-free`. */
   fallbackModel?: string;
+  /** Modelo terciário `provider/model`. Padrão: `opencode-go/deepseek-v4.1-flash`. */
+  tertiaryModel?: string;
   /** Lista completa personalizada de modelos em ordem de tentativa. */
   models?: string[];
   /** Binário do OpenCode CLI. Padrão: `OPENCODE_BIN` ou `opencode`. */
@@ -505,11 +525,13 @@ function runOpencode(
 
 /**
  * Sintetiza memórias a partir de um diálogo com fallback em cascata:
- * 1º Mimo 2.6 -> 2º Gemini 3.7 Flash -> Erro se ambos falharem.
+ * 1º Gemini 3.8 Flash (Antigravity) -> 2º Mimo 2.6 Flash (free) ->
+ * 3º `opencode-go/deepseek-v4.1-flash` -> Erro se todos falharem.
  */
 export class MimoSynthesizer {
   private readonly model: string;
   private readonly fallbackModel: string;
+  private readonly tertiaryModel: string;
   private readonly models: string[];
   private readonly binary: string;
   private readonly timeoutMs: number;
@@ -522,6 +544,7 @@ export class MimoSynthesizer {
   constructor(options: MimoSynthesizerOptions = {}) {
     this.model = options.model || DEFAULT_MIMO_MODEL;
     this.fallbackModel = options.fallbackModel || DEFAULT_FALLBACK_MODEL;
+    this.tertiaryModel = options.tertiaryModel || DEFAULT_TERTIARY_MODEL;
     this.models = options.models && options.models.length > 0 ? options.models : [];
     this.binary = resolveOpencodeBinaryPath(options.binary);
     const envTimeout = Number(process.env.DREAMS_MIMO_TIMEOUT_MS);
@@ -613,17 +636,23 @@ export class MimoSynthesizer {
     const modelsToTry: string[] =
       this.models.length > 0
         ? this.models
-        : Array.from(new Set([this.model, this.fallbackModel].filter(Boolean)));
+        : Array.from(
+            new Set(
+              [this.model, this.fallbackModel, this.tertiaryModel].filter(Boolean)
+            )
+          );
 
     const attemptErrors: string[] = [];
 
     for (const currentModel of modelsToTry) {
-      // TICKET-DREAMS-01A: `--pure` suprime plugins/sessões recursivas e o
-      // prompt vai por STDIN (nunca em `argv`, evitando E2BIG e /proc/cmdline).
+      // TICKET-DREAMS-01A: o prompt vai por STDIN (nunca em `argv`, evitando
+      // E2BIG e /proc/cmdline). SEM `--pure`: a flag desativa o plugin
+      // @cortexkit/opencode-antigravity-auth e bloqueia o provedor
+      // google/antigravity. A auto-ingestão já é blindada por
+      // `excludeSessionTitles` na camada SQL.
       const argv = [
         this.binary,
         "run",
-        "--pure",
         "--title",
         "Dreams Synthesis",
         "--dir",

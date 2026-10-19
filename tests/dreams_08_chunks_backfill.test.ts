@@ -339,17 +339,22 @@ interface Recorder {
 /**
  * Cria um binário REAL de transporte: script bash que incrementa um contador,
  * grava o stdin de cada invocação em disco e imprime uma memória JSON única.
- * `failFrom` (1-based) faz as invocações a partir daquele número falharem com
- * exit 1 — como a cascata tenta modelo primário + fallback, cada chunk que
- * deve falhar consome duas invocações (por isso o padrão `failSequence`).
+ *
+ * `failFrom` (1-based) faz TODAS as invocações a partir daquele número falharem
+ * com exit 1. A falha é ancorada no Nº de invocação (e não no modelo) porque
+ * cada chunk consome 1 tentativa por modelo da cascata: como os chunks 1 e 2
+ * são concluídos pelo modelo primário (1 invocação cada = #1 e #2), qualquer
+ * invocação `>= 3` pertence ao 3º chunk — assim o teste permanece válido seja a
+ * cascata de 2 ou 3 degraus (Antigravity → Mimo → opencode-go/deepseek).
  */
-function makeRecorder(name: string, failSequence: number[] = []): Recorder {
+function makeRecorder(name: string, failFrom?: number): Recorder {
   const dir = freshDir(name);
   const bin = path.join(dir, "opencode_recorder.sh");
   const countFile = path.join(dir, "count");
-  const failCase = failSequence
-    .map((n) => `  ${n}) echo "modelo indisponível (fixture real)" >&2; exit 1;;`)
-    .join("\n");
+  const failGuard =
+    typeof failFrom === "number" && failFrom > 0
+      ? `if [ "$N" -ge ${failFrom} ]; then echo "modelo indisponível (fixture real)" >&2; exit 1; fi`
+      : "";
 
   fs.writeFileSync(
     bin,
@@ -359,10 +364,7 @@ function makeRecorder(name: string, failSequence: number[] = []): Recorder {
       'N=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))',
       'printf "%s" "$N" > "$COUNT_FILE"',
       `cat > "${dir}/stdin_$N.log"`,
-      "case \"$N\" in",
-      failCase,
-      "  *) ;;",
-      "esac",
+      failGuard,
       `SIG=$(md5sum "${dir}/stdin_$N.log" | cut -c1-16)`,
       'H1=${SIG:0:4}; H2=${SIG:4:4}; H3=${SIG:8:4}; H4=${SIG:12:4}',
       `printf '[{"scope":"collective","fact":"Memoria do chunk %s referencia %s %s %s %s com licoes consolidadas do dia","category":"learning"}]\\n' "$N" "$H1" "$H2" "$H3" "$H4"`,
@@ -474,8 +476,10 @@ describe("DREAMS-08A — remSleep processa cada chunk sequencialmente", () => {
 
   test("falha mid-chunk: handoff preservado byte-a-byte, checkpoint não avança e nada falso é gravado", async () => {
     const baseDir = freshDir("rem_fail");
-    // Cascata = 2 modelos por chunk: falhar nas invocações 3 e 4 adia o 3º chunk.
-    const rec = makeRecorder("rem_fail_recorder", [3, 4]);
+    // Chunks 1 e 2 concluem no modelo primário (invocações #1 e #2); o 3º chunk
+    // passa a falhar a partir da invocação #3, para QUALQUER degrau da cascata
+    // (com 3 modelos: #3, #4 e #5 falham → chunk 3 adiado integralmente).
+    const rec = makeRecorder("rem_fail_recorder", 3);
     const dialogue = buildLongDialogue();
     const pendingFile = path.join(baseDir, "dialogue_pending.txt");
     fs.writeFileSync(pendingFile, dialogue);

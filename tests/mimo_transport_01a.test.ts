@@ -3,9 +3,9 @@
  * subprocesso do `mimo_synthesizer.ts`.
  *
  * Cobre três garantias:
- *   1. `--pure` compulsória e transporte do prompt por STDIN — o prompt NUNCA
- *      entra em `argv` (elimina E2BIG de `MAX_ARG_STRLEN` e a exposição em
- *      `/proc/<pid>/cmdline`);
+ *   1. ausência de `--pure` (que desativaria o plugin de auth do Antigravity) e
+ *      transporte do prompt por STDIN — o prompt NUNCA entra em `argv` (elimina
+ *      E2BIG de `MAX_ARG_STRLEN` e a exposição em `/proc/<pid>/cmdline`);
  *   2. teto em BYTES UTF-8 reais (`MAX_PROMPT_BYTES`) com corte de cauda que
  *      não parte code points multibyte;
  *   3. um diálogo grande e acentuado (multibyte) atravessa um subprocesso REAL
@@ -105,8 +105,8 @@ describe("TICKET-DREAMS-01A — helpers de bytes UTF-8 (puros)", () => {
   });
 });
 
-describe("TICKET-DREAMS-01A — transporte real por STDIN e flag --pure", () => {
-  test("argv NÃO contém o prompt: 8 itens com --pure, e o prompt chega por stdin", async () => {
+describe("TICKET-DREAMS-01A — transporte real por STDIN e ausência de --pure", () => {
+  test("argv NÃO contém o prompt: 7 itens sem --pure, e o prompt chega por stdin", async () => {
     const rec = makeRecorder("short");
     const dialogue = "user: use sempre a cota gratuita\nassistant: combinado";
     const result = await runWithRecorder(async () => {
@@ -121,14 +121,13 @@ describe("TICKET-DREAMS-01A — transporte real por STDIN e flag --pure", () => 
     // Contrato de saída real.
     expect(result.error).toBeNull();
     expect(result.modelUsed).toBe(DEFAULT_MIMO_MODEL);
-    expect(result.source).toBe("mimo");
+    expect(result.source).toBe("gemini");
     expect(result.memories.length).toBe(1);
 
     // Contrato de entrada: sequência exata de argv, SEM o prompt.
     const argv = readArgv(rec.argvLog);
     expect(argv).toEqual([
       "run",
-      "--pure",
       "--title",
       "Dreams Synthesis",
       "--dir",
@@ -136,8 +135,9 @@ describe("TICKET-DREAMS-01A — transporte real por STDIN e flag --pure", () => 
       "--model",
       DEFAULT_MIMO_MODEL,
     ]);
-    expect(argv.length).toBe(8);
-    expect(argv[1]).toBe("--pure");
+    expect(argv.length).toBe(7);
+    // `--pure` desativa o plugin de auth do Antigravity: nunca deve ser injetada.
+    expect(argv).not.toContain("--pure");
     // NENHUM item de argv contém o prompt.
     expect(argv.some((a) => a.includes("<dialogo>"))).toBe(false);
     expect(argv.some((a) => a.includes("cota gratuita"))).toBe(false);
@@ -177,7 +177,7 @@ describe("TICKET-DREAMS-01A — transporte real por STDIN e flag --pure", () => 
 
     // argv segue minúsculo e sem prompt → impossível estourar MAX_ARG_STRLEN.
     const argv = readArgv(rec.argvLog);
-    expect(argv.length).toBe(8);
+    expect(argv.length).toBe(7);
     expect(argv.some((a) => a.includes("<dialogo>"))).toBe(false);
     const argvBytes = argv.reduce((acc, a) => acc + utf8ByteLength(a), 0);
     expect(argvBytes).toBeLessThan(1024);
@@ -217,7 +217,7 @@ describe("TICKET-DREAMS-01A — transporte real por STDIN e flag --pure", () => 
     expect(result.promptBytes).toBeLessThan(MAX_PROMPT_BYTES);
   });
 
-  test("--pure é compulsória e o binário/argv usam o cwd informado", async () => {
+  test("--pure não é injetada e o binário/argv usam o cwd informado", async () => {
     const rec = makeRecorder("cwd");
     await runWithRecorder(async () => {
       const synth = new MimoSynthesizer({
@@ -229,7 +229,7 @@ describe("TICKET-DREAMS-01A — transporte real por STDIN e flag --pure", () => 
       return synth.synthesize("user: validando cwd");
     });
     const argv = readArgv(rec.argvLog);
-    expect(argv).toContain("--pure");
+    expect(argv).not.toContain("--pure");
     expect(argv[0]).toBe("run");
   });
 });

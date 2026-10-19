@@ -2,7 +2,7 @@
  * TICKET-DREAMS-06 — Sanitização ativa de segredos (`redactSecrets`) nos seams
  * de persistência do OpenCode Dreams.
  *
- * Suíte determinística SDET (Hugo) — SEM mocks, SQLite real + FS real isolado
+ * Suíte determinística SDET (Test Engineer) — SEM mocks, SQLite real + FS real isolado
  * em /tmp/dreams_test_sec_* (nunca o ~/.config/opencode/dreams de produção):
  *
  *   Cenário A — `dream_learn`: JSONL diário (`daily/log_YYYY-MM-DD.jsonl`)
@@ -180,14 +180,14 @@ describe("TICKET-DREAMS-06 — Cenário A: dream_learn redige o JSONL diário", 
     const fact = `Segredo repetido ${OPENAI_KEY} colado no chat`;
     const dbBefore = new DreamsDB(path.join(TEST_BASE_DIR, "dreams_06.db")); // reopen do MESMO arquivo
     try {
-      dream_learn({ scope: "agent:hugo", fact, category: "pitfall" }, { dailyDir: DAILY_DIR, db: dbBefore });
-      dream_learn({ scope: "agent:hugo", fact, category: "pitfall" }, { dailyDir: DAILY_DIR, db: dbBefore });
+      dream_learn({ scope: "agent:alice", fact, category: "pitfall" }, { dailyDir: DAILY_DIR, db: dbBefore });
+      dream_learn({ scope: "agent:alice", fact, category: "pitfall" }, { dailyDir: DAILY_DIR, db: dbBefore });
 
       // JSONL: duas linhas (fonte de verdade append-only), AMBAS censuradas.
       const all = readDailyJsonlRecords();
-      const hugoLines = all.filter((r) => r.scope === "agent:hugo");
-      expect(hugoLines.length).toBe(2);
-      for (const r of hugoLines) {
+      const aliceLines = all.filter((r) => r.scope === "agent:alice");
+      expect(aliceLines.length).toBe(2);
+      for (const r of aliceLines) {
         expect(r.fact).toContain(`sk-${REDACTED_PLACEHOLDER}`);
         expect(r.fact).not.toContain(OPENAI_KEY);
       }
@@ -195,7 +195,7 @@ describe("TICKET-DREAMS-06 — Cenário A: dream_learn redige o JSONL diário", 
       // SQLite: dedup EXATO sobre o fato SANITIZADO — uma única row, reforçada.
       const rows = dbBefore
         .getAllMemories()
-        .filter((m) => m.scope === "agent:hugo" && m.fact.includes(`sk-${REDACTED_PLACEHOLDER}`));
+        .filter((m) => m.scope === "agent:alice" && m.fact.includes(`sk-${REDACTED_PLACEHOLDER}`));
       expect(rows.length).toBe(1);
       expect(rows[0]!.confirmations).toBeGreaterThanOrEqual(2);
       expect(rows[0]!.fact).not.toContain(OPENAI_KEY);
@@ -350,7 +350,7 @@ describe("TICKET-DREAMS-06 — Cenário C: defesa em profundidade em DreamsDB.in
   });
 
   test("C1: insertMemory DIRETO redige secret='...' antes do INSERT (chamador malicioso/não-sanitizado)", () => {
-    const id = db.insertMemory("agent:dante", "chave privada secret='12345678'", "preference");
+    const id = db.insertMemory("agent:lead", "chave privada secret='12345678'", "preference");
     const row = db.getAllMemories().find((m) => m.id === id);
     expect(row).toBeDefined();
     expect(row!.fact).toBe("chave privada secret='***REDACTED***'");
@@ -359,17 +359,17 @@ describe("TICKET-DREAMS-06 — Cenário C: defesa em profundidade em DreamsDB.in
 
   test("C2: insertMemory de fato JÁ redigido não re-redige (idempotência no seam)", () => {
     const already = "chave privada secret='***REDACTED***' do servidor antigo (registro)";
-    const id = db.insertMemory("agent:dante", already, "learning");
+    const id = db.insertMemory("agent:lead", already, "learning");
     const row = db.getAllMemories().find((m) => m.id === id);
     expect(row!.fact).toBe(already); // byte-idêntico: sem placeholder duplicado
     expect(row!.fact).not.toContain("***REDACTED******REDACTED***");
   });
 
   test("C3: dedup por fato sanitizado — duas entradas cruas distintas que colapsam no mesmo sanitized fundem em 1 row", () => {
-    const before = db.getAllMemories().filter((m) => m.scope === "agent:kael").length;
-    db.insertMemory("agent:kael", `primeira nota secret='${PASSWORD_VALUE}'`, "pitfall");
-    db.insertMemory("agent:kael", `primeira nota secret='${PASSWORD_VALUE}'`, "pitfall"); // repetida
-    const rows = db.getAllMemories().filter((m) => m.scope === "agent:kael");
+    const before = db.getAllMemories().filter((m) => m.scope === "agent:architect").length;
+    db.insertMemory("agent:architect", `primeira nota secret='${PASSWORD_VALUE}'`, "pitfall");
+    db.insertMemory("agent:architect", `primeira nota secret='${PASSWORD_VALUE}'`, "pitfall"); // repetida
+    const rows = db.getAllMemories().filter((m) => m.scope === "agent:architect");
     expect(rows.length).toBe(before + 1); // exatamente UMA row nova
     expect(rows[0]!.fact).not.toContain(PASSWORD_VALUE);
     expect(rows[0]!.fact).toContain(REDACTED_PLACEHOLDER);
@@ -378,10 +378,10 @@ describe("TICKET-DREAMS-06 — Cenário C: defesa em profundidade em DreamsDB.in
 
   test("C4: TODAS as famílias (sk-/AIza/Bearer/JWT/password=) via insertMemory direto ficam censuradas", () => {
     const seeds: Array<[string, string]> = [
-      ["agent:cris", `api openai ${OPENAI_KEY} no CI`],
-      ["agent:cris", `google ${GOOGLE_KEY} no CI`],
-      ["agent:tales", `header Bearer ${BEARER_JWT} interceptado`],
-      ["agent:tales", `jwt ${STANDALONE_JWT} capturado`],
+      ["agent:developer", `api openai ${OPENAI_KEY} no CI`],
+      ["agent:developer", `google ${GOOGLE_KEY} no CI`],
+      ["agent:engineer", `header Bearer ${BEARER_JWT} interceptado`],
+      ["agent:engineer", `jwt ${STANDALONE_JWT} capturado`],
       ["collective", `deploy com password=${PASSWORD_VALUE} na env`],
     ];
     for (const [scope, fact] of seeds) db.insertMemory(scope, fact, "learning");
@@ -413,7 +413,7 @@ describe("TICKET-DREAMS-06 — Cenário C: defesa em profundidade em DreamsDB.in
     ];
 
     const ids = cases.map(({ fact, expected }) => {
-      const id = db.insertMemory("agent:hugo", fact, "pitfall");
+      const id = db.insertMemory("agent:alice", fact, "pitfall");
       const row = db.getAllMemories().find((m) => m.id === id);
       expect(row).toBeDefined();
       expect(row!.fact).toBe(redactSecrets(fact)); // seam reaplica a MESMA função
@@ -453,7 +453,7 @@ describe("TICKET-DREAMS-06 — Cenário D: projeções markdown sem credenciais 
       { dailyDir: DAILY_DIR, db }
     );
     dream_learn(
-      { scope: "agent:dante", fact: `Orquestrador usou ${GOOGLE_KEY} no deploy`, category: "learning" },
+      { scope: "agent:lead", fact: `Orquestrador usou ${GOOGLE_KEY} no deploy`, category: "learning" },
       { dailyDir: DAILY_DIR, db }
     );
 
@@ -461,10 +461,10 @@ describe("TICKET-DREAMS-06 — Cenário D: projeções markdown sem credenciais 
     await cycle.deepSleep(); // aplica decaimento + updateProjections (pós-poda)
 
     const collective = fs.readFileSync(path.join(COLLECTIVE_DIR, "COLLECTIVE_MEMORY.md"), "utf-8");
-    const persona = fs.readFileSync(path.join(PERSONAS_DIR, "dante.md"), "utf-8");
+    const persona = fs.readFileSync(path.join(PERSONAS_DIR, "lead.md"), "utf-8");
 
     expectNoRawSecrets(collective, "D1/COLLECTIVE_MEMORY.md");
-    expectNoRawSecrets(persona, "D1/personas/dante.md");
+    expectNoRawSecrets(persona, "D1/personas/lead.md");
 
     // Prova de pipeline (não basta arquivo vazio): o fato censurado PROJETOU-SE.
     expect(collective).toContain(`sk-${REDACTED_PLACEHOLDER}`);

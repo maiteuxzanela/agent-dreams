@@ -6,7 +6,11 @@
   "main": "src/index.ts",
   "module": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./mcp": "./src/mcp/server.ts"
+  },
+  "bin": {
+    "dreams-mcp": "./bin/dreams-mcp.js"
   },
   "scripts": {
     "test": "DREAMS_OFFLINE=1 bun test",
@@ -25,7 +29,9 @@
     "typescript": "^5.9.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@opencode-ai/plugin": "^1.18.35",
-    "@opencode-ai/sdk": "^1.18.35"
+    "@opencode-ai/sdk": "^1.18.35",
+    "zod": "^4.6.7"
   }
 }

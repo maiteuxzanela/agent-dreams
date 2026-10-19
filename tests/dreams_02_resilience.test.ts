@@ -422,31 +422,31 @@ describe("TICKET-DREAMS-02B — projeções pós-deep e expurgo de personas órf
   test("EXPURGO: deepSleep remove personas/*.md sem memórias ativas e preserva os demais", async () => {
     const { db, baseDir } = makeDb("orphan");
     const cycle = new SleepCycle(db, { baseDir });
-    const kaelId = db.insertMemory("agent:kael", "Preferencia viva do kael", "preference");
-    db.insertMemory("agent:diana", "Decisao viva da diana", "decision");
+    const architectId = db.insertMemory("agent:architect", "Preferencia viva do architect", "preference");
+    db.insertMemory("agent:auditor", "Decisao viva da auditor", "decision");
 
     cycle.updateProjections();
     const personasDir = path.join(baseDir, "personas");
-    expect(fs.existsSync(path.join(personasDir, "kael.md"))).toBe(true);
-    expect(fs.existsSync(path.join(personasDir, "diana.md"))).toBe(true);
+    expect(fs.existsSync(path.join(personasDir, "architect.md"))).toBe(true);
+    expect(fs.existsSync(path.join(personasDir, "auditor.md"))).toBe(true);
 
     // Arquivos que o projetor NÃO gerencia (não-.md / nomes não-canônicos).
     fs.writeFileSync(path.join(personasDir, "notes.txt"), "nao-md");
     fs.writeFileSync(path.join(personasDir, ".oculto.md"), "nome inseguro");
     fs.writeFileSync(path.join(personasDir, "a.b.md"), "nome nao-canonico");
 
-    // kael perde TODAS as memórias ativas.
-    db.deleteMemory(kaelId);
+    // architect perde TODAS as memórias ativas.
+    db.deleteMemory(architectId);
 
     await cycle.deepSleep();
 
-    expect(fs.existsSync(path.join(personasDir, "kael.md"))).toBe(false);
-    expect(fs.existsSync(path.join(personasDir, "diana.md"))).toBe(true);
+    expect(fs.existsSync(path.join(personasDir, "architect.md"))).toBe(false);
+    expect(fs.existsSync(path.join(personasDir, "auditor.md"))).toBe(true);
     // Intocados pelo expurgo.
     expect(fs.existsSync(path.join(personasDir, "notes.txt"))).toBe(true);
     expect(fs.existsSync(path.join(personasDir, ".oculto.md"))).toBe(true);
     expect(fs.existsSync(path.join(personasDir, "a.b.md"))).toBe(true);
-    expect(fs.readFileSync(path.join(personasDir, "diana.md"), "utf8")).toContain("Decisao viva da diana");
+    expect(fs.readFileSync(path.join(personasDir, "auditor.md"), "utf8")).toContain("Decisao viva da auditor");
   });
 
   test("REORDENAÇÃO: remSleep NÃO projeta; a projeção só ocorre no deepSleep (pós-poda)", async () => {

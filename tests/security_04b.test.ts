@@ -1,6 +1,6 @@
 /**
  * TICKET-DREAMS-04 — Frente 4B
- * Suíte determinística (SDET / Hugo) para:
+ * Suíte determinística (SDET / Test Engineer) para:
  *   - src/core/security.ts           (redação de segredos, fail-safe, idempotente)
  *   - src/core/prompt_injector.ts    (envelope anti-prompt-injection + defang)
  *   - src/core/mimo_synthesizer.ts   (redação antes do subprocesso/persistência)
@@ -170,13 +170,13 @@ describe("[4B] prompt_injector.ts — envelope passivo e defang", () => {
   });
 
   test("persona também é envelopada (ambas as seções entre as tags)", () => {
-    const dir = makeDreamsDir({ agent: "hugo", content: "Memória da persona hugo." }, "Memória coletiva.");
-    const block = buildSystemPromptInjection(dir, "hugo")!;
+    const dir = makeDreamsDir({ agent: "alice", content: "Memória da persona alice." }, "Memória coletiva.");
+    const block = buildSystemPromptInjection(dir, "alice")!;
     const iOpen = block.indexOf(MEMORY_DATA_OPEN_TAG);
     const iClose = block.indexOf(MEMORY_DATA_CLOSE_TAG);
     expect(block.indexOf("Memória coletiva.")).toBeGreaterThan(iOpen);
-    expect(block.indexOf("Memória da persona hugo.")).toBeGreaterThan(iOpen);
-    expect(block.indexOf("Memória da persona hugo.")).toBeLessThan(iClose);
+    expect(block.indexOf("Memória da persona alice.")).toBeGreaterThan(iOpen);
+    expect(block.indexOf("Memória da persona alice.")).toBeLessThan(iClose);
   });
 
   test("DEFANG: tag literal de fechamento numa memória não escapa o envelope (1 close tag real)", () => {

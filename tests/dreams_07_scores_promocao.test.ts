@@ -1,5 +1,5 @@
 /**
- * TICKET-DREAMS-07 — SDET (Hugo)
+ * TICKET-DREAMS-07 — SDET (Test Engineer)
  * Suíte determinística dedicada para a frentes A/B do ticket:
  *   7A — Anti-duplo reforço dual-write (`synced_to_db`) e preservação dos
  *        pesos de CATEGORY_WEIGHTS no Light Sleep (src/tools.ts, sleep_cycle.ts).
@@ -162,7 +162,7 @@ describe("[7A] anti-duplo reforço: dual-write marca synced_to_db e o Light Slee
     const dead = new DreamsDB(path.join(env.baseDir, "dead.db"));
     dead.close(); // conexão real encerrada → insertMemory lança "database is closed"
     const fact = "Fato que sobrevive mesmo com o espelho SQLite indisponivel";
-    dream_learn({ scope: "agent:hugo", fact, category: "learning" }, { dailyDir: env.dailyDir, db: dead });
+    dream_learn({ scope: "agent:alice", fact, category: "learning" }, { dailyDir: env.dailyDir, db: dead });
 
     const records = readDailyRecords(env.dailyDir);
     expect(records.length).toBe(1); // fail-soft: fato NÃO é perdido
@@ -246,12 +246,12 @@ describe("[7B] promoção Persona ➔ Coletivo reforça a memória promovida", (
   test("reinforce default: score +0.5 e confirmations +1, id/scope preservados e clones expurgados", () => {
     const { db } = makeDb();
 
-    const xId = db.insertMemory("agent:x", "Laya RLCD usa inferencia local", "decision", 2.0, 0.3);
-    const zId = db.insertMemory("agent:z", "inferencia local usa Laya RLCD", "decision", 1.0, 0.3);
+    const xId = db.insertMemory("agent:x", "motor dedicado usa inferencia local", "decision", 2.0, 0.3);
+    const zId = db.insertMemory("agent:z", "inferencia local usa motor dedicado", "decision", 1.0, 0.3);
     expect(xId).not.toBe(zId);
     rawRun(db, "UPDATE memories SET last_reinforced = ? WHERE id = ?", [OLD, xId]);
 
-    const cId = db.insertMemory("collective", "Usa Laya RLCD inferencia local!", "decision");
+    const cId = db.insertMemory("collective", "Usa motor dedicado inferencia local!", "decision");
 
     expect(cId).toBe(xId); // a linha de maior score é promovida (id preservado)
     const all = db.getAllMemories();

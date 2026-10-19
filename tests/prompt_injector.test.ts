@@ -74,10 +74,10 @@ describe("prompt_injector — memória coletiva (diretório temporário real)", 
   beforeEach(() => resetDreamsDir());
 
   test("readCollectiveMemory lê collective/COLLECTIVE_MEMORY.md do diretório informado", () => {
-    writeCollective("# Memória Coletiva de Teste\nFato coletivo: Dante orquestra o harness.");
+    writeCollective("# Memória Coletiva de Teste\nFato coletivo: Lead orquestra o harness.");
     const content = readCollectiveMemory(DREAMS_TMP);
     expect(content).toBeString();
-    expect(content!).toContain("Fato coletivo: Dante orquestra o harness.");
+    expect(content!).toContain("Fato coletivo: Lead orquestra o harness.");
   });
 
   test("readCollectiveMemory ignora dreamsDir vazio/não-string sem lançar", () => {
@@ -112,20 +112,20 @@ describe("prompt_injector — memória individual de persona", () => {
   beforeEach(() => resetDreamsDir());
 
   test("readPersonaMemory lê personas/<agent>.md do diretório temporário", () => {
-    writePersona("kael", "Kael prefere inferência na GPU Pascal.");
-    const content = readPersonaMemory(DREAMS_TMP, "kael");
+    writePersona("architect", "Architect prefere inferência acelerada em hardware dedicado.");
+    const content = readPersonaMemory(DREAMS_TMP, "architect");
     expect(content).toBeString();
-    expect(content!).toContain("Kael prefere inferência na GPU Pascal.");
+    expect(content!).toContain("Architect prefere inferência acelerada em hardware dedicado.");
   });
 
   test("buildSystemPromptInjection inclui a seção da persona quando o arquivo existe", () => {
     writeCollective("Coletivo existe.");
-    writePersona("clara", "Clara é a guardiã do Quality Gate.");
-    const block = buildSystemPromptInjection(DREAMS_TMP, "clara");
+    writePersona("reviewer", "Reviewer é responsável pelo Quality Gate.");
+    const block = buildSystemPromptInjection(DREAMS_TMP, "reviewer");
     expect(block).toBeString();
     expect(block!).toContain(COLLECTIVE_SECTION_HEADER);
-    expect(block!).toContain(`${PERSONA_SECTION_HEADER_PREFIX}clara)`);
-    expect(block!).toContain("Clara é a guardiã do Quality Gate.");
+    expect(block!).toContain(`${PERSONA_SECTION_HEADER_PREFIX}reviewer)`);
+    expect(block!).toContain("Reviewer é responsável pelo Quality Gate.");
   });
 
   test("persona sem arquivo: bloco contém só a coletiva (persona pulada graciosamente)", () => {
@@ -137,11 +137,11 @@ describe("prompt_injector — memória individual de persona", () => {
   });
 
   test("apenas persona (sem coletiva): bloco monta só a seção da persona", () => {
-    writePersona("maya", "Maya faz busca AST cirúrgica.");
-    const block = buildSystemPromptInjection(DREAMS_TMP, "maya");
+    writePersona("analyst", "Analyst faz busca AST cirúrgica.");
+    const block = buildSystemPromptInjection(DREAMS_TMP, "analyst");
     expect(block).toBeString();
     expect(block!.startsWith(INJECTION_HEADER)).toBe(true);
-    expect(block!).toContain(`${PERSONA_SECTION_HEADER_PREFIX}maya)`);
+    expect(block!).toContain(`${PERSONA_SECTION_HEADER_PREFIX}analyst)`);
     expect(block!).not.toContain(COLLECTIVE_SECTION_HEADER);
   });
 
@@ -180,8 +180,8 @@ describe("prompt_injector — fallback gracioso (nunca lança)", () => {
     expect(readCollectiveMemory(DREAMS_TMP)).toBeNull();
     writeCollective("   \n\t\n   ");
     expect(readCollectiveMemory(DREAMS_TMP)).toBeNull();
-    writePersona("kael", "");
-    expect(readPersonaMemory(DREAMS_TMP, "kael")).toBeNull();
+    writePersona("architect", "");
+    expect(readPersonaMemory(DREAMS_TMP, "architect")).toBeNull();
   });
 
   test("resolveSessionAgent: sessionID undefined/vazio/whitespace → null", async () => {
@@ -213,20 +213,20 @@ describe("prompt_injector — resolução de agente via SQLite real (/tmp)", () 
     const dbPath = path.join(TEST_ROOT, "sessions_session.db");
     const db = new Database(dbPath);
     db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT)");
-    db.query("INSERT INTO session (id, agent) VALUES (?, ?)").run("ses_db_1", "cris");
+    db.query("INSERT INTO session (id, agent) VALUES (?, ?)").run("ses_db_1", "developer");
     db.close();
 
-    expect(await resolveSessionAgent("ses_db_1", null, dbPath)).toBe("cris");
+    expect(await resolveSessionAgent("ses_db_1", null, dbPath)).toBe("developer");
   });
 
   test("lê agent da tabela session_v2 e normaliza prefixos (opencode/<nome>)", async () => {
     const dbPath = path.join(TEST_ROOT, "sessions_session_v2.db");
     const db = new Database(dbPath);
     db.exec("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, agent TEXT)");
-    db.query("INSERT INTO session_v2 (id, agent) VALUES (?, ?)").run("ses_v2_1", "opencode/maya");
+    db.query("INSERT INTO session_v2 (id, agent) VALUES (?, ?)").run("ses_v2_1", "opencode/analyst");
     db.close();
 
-    expect(await resolveSessionAgent("ses_v2_1", null, dbPath)).toBe("maya");
+    expect(await resolveSessionAgent("ses_v2_1", null, dbPath)).toBe("analyst");
   });
 
   test("fallback: json_extract do agent na mensagem mais recente (tabela message)", async () => {
@@ -235,17 +235,17 @@ describe("prompt_injector — resolução de agente via SQLite real (/tmp)", () 
     db.exec("CREATE TABLE message (session_id TEXT, data TEXT, time_created INTEGER)");
     db.query("INSERT INTO message (session_id, data, time_created) VALUES (?, ?, ?)").run(
       "ses_msg_1",
-      JSON.stringify({ agent: "agent:dante", text: "mensagem" }),
+      JSON.stringify({ agent: "agent:lead", text: "mensagem" }),
       1000
     );
     db.query("INSERT INTO message (session_id, data, time_created) VALUES (?, ?, ?)").run(
       "ses_msg_1",
-      JSON.stringify({ agent: "opencode/clara", text: "mais recente" }),
+      JSON.stringify({ agent: "opencode/reviewer", text: "mais recente" }),
       2000
     );
     db.close();
 
-    expect(await resolveSessionAgent("ses_msg_1", null, dbPath)).toBe("clara");
+    expect(await resolveSessionAgent("ses_msg_1", null, dbPath)).toBe("reviewer");
   });
 
   test("sessão ausente no banco real → null", async () => {
@@ -262,16 +262,16 @@ describe("prompt_injector — resolução de agente via SQLite real (/tmp)", () 
 // 4b. Extração de persona a partir do título (função pura, sem I/O)
 // ---------------------------------------------------------------------------
 describe("prompt_injector — extractAgentFromTitle (função pura)", () => {
-  test("'clara (@clara teammate)' → 'clara'", () => {
-    expect(extractAgentFromTitle("clara (@clara teammate)")).toBe("clara");
+  test("'reviewer (@reviewer teammate)' → 'reviewer'", () => {
+    expect(extractAgentFromTitle("reviewer (@reviewer teammate)")).toBe("reviewer");
   });
 
-  test("'tulio-engine (@tulio teammate)' → 'tulio' (prefixo do título é irrelevante)", () => {
-    expect(extractAgentFromTitle("tulio-engine (@tulio teammate)")).toBe("tulio");
+  test("'bob-engine (@bob teammate)' → 'bob' (prefixo do título é irrelevante)", () => {
+    expect(extractAgentFromTitle("bob-engine (@bob teammate)")).toBe("bob");
   });
 
-  test("'Auditoria Diana Dreams Prompt Injection (@diana subagent)' → 'diana'", () => {
-    expect(extractAgentFromTitle("Auditoria Diana Dreams Prompt Injection (@diana subagent)")).toBe("diana");
+  test("'Auditoria Independente Dreams Prompt Injection (@auditor subagent)' → 'auditor'", () => {
+    expect(extractAgentFromTitle("Auditoria Independente Dreams Prompt Injection (@auditor subagent)")).toBe("auditor");
   });
 
   test("título de chat comum sem assinatura → null", () => {
@@ -290,9 +290,9 @@ describe("prompt_injector — extractAgentFromTitle (função pura)", () => {
     expect(extractAgentFromTitle(42)).toBeNull();
     expect(extractAgentFromTitle({})).toBeNull();
     expect(extractAgentFromTitle("")).toBeNull();
-    expect(extractAgentFromTitle("@clara")).toBeNull();
-    expect(extractAgentFromTitle("clara (@clara)")).toBeNull();
-    expect(extractAgentFromTitle("clara (@clara colega)")).toBeNull();
+    expect(extractAgentFromTitle("@reviewer")).toBeNull();
+    expect(extractAgentFromTitle("reviewer (@reviewer)")).toBeNull();
+    expect(extractAgentFromTitle("reviewer (@reviewer colega)")).toBeNull();
   });
 
   test("case-insensitive nos papéis: '@KaEL SUBAGENT' → 'KaEL' normalizado", () => {
@@ -306,46 +306,46 @@ describe("prompt_injector — extractAgentFromTitle (função pura)", () => {
 describe("prompt_injector — título do Ensemble prevalece sobre o agent herdado (SQLite real)", () => {
   beforeEach(() => resetDreamsDir());
 
-  test("agent='dante' + title='clara (@clara teammate)' → resolve 'clara' (sobrepõe o lead)", async () => {
-    const dbPath = path.join(TEST_ROOT, "sessions_title_clara.db");
+  test("agent='lead' + title='reviewer (@reviewer teammate)' → resolve 'reviewer' (sobrepõe o lead)", async () => {
+    const dbPath = path.join(TEST_ROOT, "sessions_title_reviewer.db");
     const db = new Database(dbPath);
     db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT, title TEXT)");
     db.query("INSERT INTO session (id, agent, title) VALUES (?, ?, ?)").run(
-      "ses_titulo_clara",
-      "dante",
-      "clara (@clara teammate)"
+      "ses_titulo_reviewer",
+      "lead",
+      "reviewer (@reviewer teammate)"
     );
     db.close();
 
-    expect(await resolveSessionAgent("ses_titulo_clara", null, dbPath)).toBe("clara");
+    expect(await resolveSessionAgent("ses_titulo_reviewer", null, dbPath)).toBe("reviewer");
   });
 
-  test("agent='dante' + title de chat sem assinatura → resolve 'dante' normalmente", async () => {
-    const dbPath = path.join(TEST_ROOT, "sessions_title_dante.db");
+  test("agent='lead' + title de chat sem assinatura → resolve 'lead' normalmente", async () => {
+    const dbPath = path.join(TEST_ROOT, "sessions_title_lead.db");
     const db = new Database(dbPath);
     db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT, title TEXT)");
     db.query("INSERT INTO session (id, agent, title) VALUES (?, ?, ?)").run(
-      "ses_titulo_dante",
-      "dante",
+      "ses_titulo_lead",
+      "lead",
       "Chat normal sobre arquitetura"
     );
     db.close();
 
-    expect(await resolveSessionAgent("ses_titulo_dante", null, dbPath)).toBe("dante");
+    expect(await resolveSessionAgent("ses_titulo_lead", null, dbPath)).toBe("lead");
   });
 
-  test("agent='valerio' + title='Auditoria Diana (@diana subagent)' → resolve 'diana'", async () => {
-    const dbPath = path.join(TEST_ROOT, "sessions_title_diana.db");
+  test("agent='coordinator' + title='Auditoria Independente (@auditor subagent)' → resolve 'auditor'", async () => {
+    const dbPath = path.join(TEST_ROOT, "sessions_title_auditor.db");
     const db = new Database(dbPath);
     db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT, title TEXT)");
     db.query("INSERT INTO session (id, agent, title) VALUES (?, ?, ?)").run(
-      "ses_titulo_diana",
-      "valerio",
-      "Auditoria Diana Dreams Prompt Injection (@diana subagent)"
+      "ses_titulo_auditor",
+      "coordinator",
+      "Auditoria Independente Dreams Prompt Injection (@auditor subagent)"
     );
     db.close();
 
-    expect(await resolveSessionAgent("ses_titulo_diana", null, dbPath)).toBe("diana");
+    expect(await resolveSessionAgent("ses_titulo_auditor", null, dbPath)).toBe("auditor");
   });
 
   test("título inválido (anti-traversal) + agent válido → cai no fallback do agent herdado", async () => {
@@ -354,22 +354,22 @@ describe("prompt_injector — título do Ensemble prevalece sobre o agent herdad
     db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT, title TEXT)");
     db.query("INSERT INTO session (id, agent, title) VALUES (?, ?, ?)").run(
       "ses_titulo_traversal",
-      "dante",
+      "lead",
       "Título com formato inválido @../escape teammate"
     );
     db.close();
 
-    expect(await resolveSessionAgent("ses_titulo_traversal", null, dbPath)).toBe("dante");
+    expect(await resolveSessionAgent("ses_titulo_traversal", null, dbPath)).toBe("lead");
   });
 
   test("schema legado: tabela session sem coluna title ainda lê session.agent (fail-soft)", async () => {
     const dbPath = path.join(TEST_ROOT, "sessions_sem_coluna_title.db");
     const db = new Database(dbPath);
     db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, agent TEXT)");
-    db.query("INSERT INTO session (id, agent) VALUES (?, ?)").run("ses_sem_title", "cris");
+    db.query("INSERT INTO session (id, agent) VALUES (?, ?)").run("ses_sem_title", "developer");
     db.close();
 
-    expect(await resolveSessionAgent("ses_sem_title", null, dbPath)).toBe("cris");
+    expect(await resolveSessionAgent("ses_sem_title", null, dbPath)).toBe("developer");
   });
 });
 
@@ -380,12 +380,12 @@ describe("prompt_injector — título do Ensemble prevalece sobre o agent herdad
 // Nada é stubado: a resposta vem por rede de verdade, como no daemon.
 describe("prompt_injector — payload do cliente com título do Ensemble (HTTP real)", () => {
   const payloads: Record<string, unknown> = {
-    ses_http_clara: { id: "ses_http_clara", agent: "dante", title: "clara (@clara teammate)" },
-    ses_http_diana: {
-      id: "ses_http_diana",
-      info: { agent: "dante", title: "Auditoria Diana (@diana subagent)" },
+    ses_http_reviewer: { id: "ses_http_reviewer", agent: "lead", title: "reviewer (@reviewer teammate)" },
+    ses_http_auditor: {
+      id: "ses_http_auditor",
+      info: { agent: "lead", title: "Auditoria Independente (@auditor subagent)" },
     },
-    ses_http_dante: { id: "ses_http_dante", agent: "dante", title: "Chat normal sobre arquitetura" },
+    ses_http_lead: { id: "ses_http_lead", agent: "lead", title: "Chat normal sobre arquitetura" },
   };
 
   let server: ReturnType<typeof Bun.serve>;
@@ -418,22 +418,22 @@ describe("prompt_injector — payload do cliente com título do Ensemble (HTTP r
     server?.stop(true);
   });
 
-  test("payload com title assinado resolve 'clara' mesmo com agent='dante' do lead", async () => {
+  test("payload com title assinado resolve 'reviewer' mesmo com agent='lead' do lead", async () => {
     const client = createOpencodeClient({ baseUrl });
     const missingDb = path.join(TEST_ROOT, "http_sem_banco_1.db");
-    expect(await resolveSessionAgent("ses_http_clara", client, missingDb)).toBe("clara");
+    expect(await resolveSessionAgent("ses_http_reviewer", client, missingDb)).toBe("reviewer");
   }, 15000);
 
-  test("title dentro de info.title também prevalece → 'diana'", async () => {
+  test("title dentro de info.title também prevalece → 'auditor'", async () => {
     const client = createOpencodeClient({ baseUrl });
     const missingDb = path.join(TEST_ROOT, "http_sem_banco_2.db");
-    expect(await resolveSessionAgent("ses_http_diana", client, missingDb)).toBe("diana");
+    expect(await resolveSessionAgent("ses_http_auditor", client, missingDb)).toBe("auditor");
   }, 15000);
 
-  test("title sem assinatura → cai no agent herdado 'dante'", async () => {
+  test("title sem assinatura → cai no agent herdado 'lead'", async () => {
     const client = createOpencodeClient({ baseUrl });
     const missingDb = path.join(TEST_ROOT, "http_sem_banco_3.db");
-    expect(await resolveSessionAgent("ses_http_dante", client, missingDb)).toBe("dante");
+    expect(await resolveSessionAgent("ses_http_lead", client, missingDb)).toBe("lead");
   }, 15000);
 
   test("404 genuíno do servidor + banco inexistente → null fail-soft", async () => {
@@ -535,8 +535,8 @@ describe("prompt_injector — truncamento anti-dumping", () => {
 
   test("readPersonaMemory também aplica o teto anti-dumping", () => {
     const totalLines = MAX_MEMORY_LINES + 100;
-    writePersona("kael", makeLines(totalLines));
-    const content = readPersonaMemory(DREAMS_TMP, "kael");
+    writePersona("architect", makeLines(totalLines));
+    const content = readPersonaMemory(DREAMS_TMP, "architect");
     expect(content).toBeString();
     expect(content!).toContain(ANTI_DUMP_NOTICE_MARKER);
     expect(content!.split("\n").length).toBeLessThanOrEqual(MAX_MEMORY_LINES + 3);
@@ -601,7 +601,7 @@ describe("hook experimental.chat.system.transform (serverPlugin real)", () => {
     const hookFn = hooks["experimental.chat.system.transform"]!;
     const output: { system: string[] } = { system: [] };
 
-    await hookFn({ sessionID: "ses_clara_fake_nao_existe_000", model }, output);
+    await hookFn({ sessionID: "ses_reviewer_fake_nao_existe_000", model }, output);
 
     expect(output.system.length).toBeLessThanOrEqual(1);
     for (const block of output.system) {

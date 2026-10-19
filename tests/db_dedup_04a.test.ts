@@ -1,6 +1,6 @@
 /**
  * TICKET-DREAMS-04 — Frente 4A
- * Suíte determinística (SDET / Hugo) para deduplicação semântica, reforço de
+ * Suíte determinística (SDET / Test Engineer) para deduplicação semântica, reforço de
  * escopo cruzado, listagem filtrada e helper de similaridade em src/core/db.ts.
  *
  * Regras: SEM mocks — SQLite real (bun:sqlite) em diretório temporário isolado.
@@ -61,16 +61,16 @@ describe("[4A] helpers determinísticos de similaridade", () => {
   });
 
   test("normalizeFactText colapsa acentos, caixa e pontuação", () => {
-    expect(normalizeFactText("Inferência, (c/d) & Laya!")).toBe("inferencia c d laya");
-    expect(normalizeFactText("  LAYA   RLCD  ")).toBe("laya rlcd");
+    expect(normalizeFactText("Inferência, (c/d) & Motor!")).toBe("inferencia c d motor");
+    expect(normalizeFactText("  MOTOR   LOCAL  ")).toBe("motor local");
     expect(normalizeFactText("")).toBe("");
     // Entradas não-string são rejeitadas de forma pura (nunca lançam).
     expect(normalizeFactText(42 as unknown as string)).toBe("");
   });
 
   test("tokenizeFact produz conjunto único (Set) sem termos vazios", () => {
-    const tokens = tokenizeFact("Laya, Laya! RLCD");
-    expect([...tokens].sort()).toEqual(["laya", "rlcd"]);
+    const tokens = tokenizeFact("Motor, Motor! Local");
+    expect([...tokens].sort()).toEqual(["local", "motor"]);
     expect(tokenizeFact("").size).toBe(0);
     expect(tokenizeFact("...---!!!").size).toBe(0);
   });
@@ -89,10 +89,10 @@ describe("[4A] helpers determinísticos de similaridade", () => {
 describe("[4A] dedup semântica same-scope", () => {
   test("fatos equivalentes (reordenação/acentos/pontuação) fundem na mesma linha e reforçam", () => {
     const db = makeDb();
-    const id1 = db.insertMemory("collective", "Inferência local usa Laya RLCD", "learning");
+    const id1 = db.insertMemory("collective", "Inferência local usa motor dedicado", "learning");
     rawRun(db, "UPDATE memories SET last_reinforced = ? WHERE id = ?", [OLD, id1]);
 
-    const id2 = db.insertMemory("collective", "laya RLCD usa inferencia local!", "learning");
+    const id2 = db.insertMemory("collective", "motor dedicado usa inferencia local!", "learning");
 
     // Mesma linha (sem clone).
     expect(id2).toBe(id1);
@@ -143,13 +143,13 @@ describe("[4A] dedup semântica same-scope", () => {
 describe("[4A] promoção Persona ➔ Coletivo", () => {
   test("promove a melhor cópia de persona REFORÇANDO score/confirmações (+0.5/+1) e expurga clones", () => {
     const db = makeDb();
-    const xId = db.insertMemory("agent:x", "Laya RLCD usa inferencia local", "decision", 2.0, 0.3);
-    const zId = db.insertMemory("agent:z", "inferencia local usa Laya RLCD", "decision", 1.0, 0.3);
+    const xId = db.insertMemory("agent:x", "motor dedicado usa inferencia local", "decision", 2.0, 0.3);
+    const zId = db.insertMemory("agent:z", "inferencia local usa motor dedicado", "decision", 1.0, 0.3);
     expect(xId).not.toBe(zId);
     // Sentinela temporal para provar que a promoção TAMBÉM atualiza last_reinforced (DREAMS-07B).
     rawRun(db, "UPDATE memories SET last_reinforced = ? WHERE id = ?", [OLD, xId]);
 
-    const cId = db.insertMemory("collective", "Usa Laya RLCD inferencia local!", "decision");
+    const cId = db.insertMemory("collective", "Usa motor dedicado inferencia local!", "decision");
 
     // A linha de maior score (agent:x) é promovida; agent:z é expurgada.
     expect(cId).toBe(xId);
@@ -170,11 +170,11 @@ describe("[4A] promoção Persona ➔ Coletivo", () => {
 
   test("promoção com reinforce=false preserva score/confirmações e last_reinforced (sem inflação)", () => {
     const db = makeDb();
-    const xId = db.insertMemory("agent:x", "Laya RLCD usa inferencia local", "decision", 2.0, 0.3);
-    db.insertMemory("agent:z", "inferencia local usa Laya RLCD", "decision", 1.0, 0.3);
+    const xId = db.insertMemory("agent:x", "motor dedicado usa inferencia local", "decision", 2.0, 0.3);
+    db.insertMemory("agent:z", "inferencia local usa motor dedicado", "decision", 1.0, 0.3);
     rawRun(db, "UPDATE memories SET last_reinforced = ? WHERE id = ?", [OLD, xId]);
 
-    const cId = db.insertMemory("collective", "Usa Laya RLCD inferencia local!", "decision", undefined, undefined, {
+    const cId = db.insertMemory("collective", "Usa motor dedicado inferencia local!", "decision", undefined, undefined, {
       reinforce: false,
     });
 

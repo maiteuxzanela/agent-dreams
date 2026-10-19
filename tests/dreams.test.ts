@@ -49,17 +49,17 @@ describe("OpenCode Dreams Plugin — Banco e Ciclo Local", () => {
   });
 
   test("Should insert memories and use SQLite FTS5 for search", () => {
-    db.insertMemory("collective", "Maiteux gosta de usar o Laya RLCD para inferência local estruturada", "learning");
-    db.insertMemory("agent:cris", "Cris deve focar em telas web responsivas", "preference");
+    db.insertMemory("collective", "A equipe gosta de usar recuperação local estruturada para inferência", "learning");
+    db.insertMemory("agent:developer", "Developer deve focar em telas web responsivas", "preference");
     
     // Lexical search
-    const results = db.recall("Laya RLCD");
+    const results = db.recall("recuperação local");
     expect(results.length).toBe(1);
-    expect(results[0].fact).toContain("Maiteux gosta de usar o Laya RLCD");
+    expect(results[0].fact).toContain("A equipe gosta de usar recuperação local estruturada");
     
-    const resultsCris = db.recall("telas", "agent:cris");
-    expect(resultsCris.length).toBe(1);
-    expect(resultsCris[0].fact).toContain("telas web");
+    const resultsDeveloper = db.recall("telas", "agent:developer");
+    expect(resultsDeveloper.length).toBe(1);
+    expect(resultsDeveloper[0].fact).toContain("telas web");
   });
 
   test("DEF-02: Temporal decay should reduce score and archive old memories", async () => {
@@ -97,14 +97,14 @@ describe("OpenCode Dreams Plugin — Banco e Ciclo Local", () => {
   });
 
   test("Memory isolation for personas", async () => {
-    db.insertMemory("agent:kael", "Kael prefere não usar Ollama localmente se puder evitar", "preference");
+    db.insertMemory("agent:architect", "Architect prefere não usar inferência local quando puder evitar", "preference");
     cycle.updateProjections();
 
     const collectiveContent = fs.readFileSync(path.join(COLLECTIVE_DIR, "COLLECTIVE_MEMORY.md"), "utf-8");
-    const kaelContent = fs.readFileSync(path.join(PERSONAS_DIR, "kael.md"), "utf-8");
+    const architectContent = fs.readFileSync(path.join(PERSONAS_DIR, "architect.md"), "utf-8");
     
-    expect(collectiveContent).not.toContain("Kael prefere não usar Ollama");
-    expect(kaelContent).toContain("Kael prefere não usar Ollama");
+    expect(collectiveContent).not.toContain("Architect prefere não usar inferência local");
+    expect(architectContent).toContain("Architect prefere não usar inferência local");
   });
 
   test("Token count for injections should be small (<= 500 chars limit as rough proxy for now)", async () => {
@@ -396,7 +396,7 @@ describe("mimo_synthesizer — Parsing Robusto, Normalização de Idioma e Sanit
     const valid = validateMemory({
       scope: "collective",
       category: "preference",
-      fact: "Maiteux prefere utilizar a arquitetura tri-camada com Cactus Needle 3",
+      fact: "A equipe prefere utilizar a arquitetura tri-camada com recuperação AST",
     });
     expect(valid).not.toBeNull();
     expect(valid?.scope).toBe("collective");
@@ -452,9 +452,9 @@ Aqui está a destilação cognitiva solicitada:
     "fact": "Fica estabelecido o uso de bun:sqlite em modo readonly para leitura de sessões"
   },
   {
-    "scope": "agent:tulio",
+    "scope": "agent:bob",
     "category": "learning",
-    "fact": "Túlio mantém a paridade estrita entre schemas e contratos do servidor MCP"
+    "fact": "Bob mantém a paridade estrita entre schemas e contratos do servidor MCP"
   }
 ]
 \`\`\`
@@ -465,7 +465,7 @@ Essas foram as memórias extraídas.
     expect(memories.length).toBe(2);
     expect(dropped).toBe(0);
     expect(memories[0].category).toBe("decision");
-    expect(memories[1].scope).toBe("agent:tulio");
+    expect(memories[1].scope).toBe("agent:bob");
   });
 
   test("parseMimoMemories tolera JSON com wrapper object { memories: [...] }", () => {
@@ -707,7 +707,7 @@ describe("SleepCycle — Integração End-to-End Isolada em /tmp", () => {
     );
     opencodeSqlite.run(
       "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
-      ["part_e2e_1", "msg_e2e_1", now - 2000, JSON.stringify({ type: "text", text: "Maiteux determinou que o Quality Gate de código pertence à Clara" })]
+      ["part_e2e_1", "msg_e2e_1", now - 2000, JSON.stringify({ type: "text", text: "A equipe determinou que o Quality Gate de código pertence ao Reviewer" })]
     );
 
     dreamsDb = new DreamsDB(dreamsDbPath);
@@ -734,7 +734,7 @@ describe("SleepCycle — Integração End-to-End Isolada em /tmp", () => {
       const dialoguePendingFile = path.join(e2eDir, "dialogue_pending.txt");
       expect(fs.existsSync(dialoguePendingFile)).toBe(true);
       const pendingContent = fs.readFileSync(dialoguePendingFile, "utf-8");
-      expect(pendingContent).toContain("Quality Gate de código pertence à Clara");
+      expect(pendingContent).toContain("Quality Gate de código pertence ao Reviewer");
 
       // 2. REM Sleep em modo offline: a síntese é adiada por indisponibilidade de modelo,
       // PRESERVANDO dialogue_pending.txt intacto e NÃO gravando dados falsos no DreamsDB.
@@ -761,24 +761,24 @@ describe("SleepCycle — Integração End-to-End Isolada em /tmp", () => {
 
   test("Ciclo completo com múltiplas personas atualiza tanto coletivo quanto personas individuais", async () => {
     dreamsDb.insertMemory("collective", "Diretriz global de isolamento e anti-mock", "decision");
-    dreamsDb.insertMemory("agent:kael", "Kael cuida da alocação de VRAM da GPU Pascal", "learning");
-    dreamsDb.insertMemory("agent:tulio", "Túlio valida schemas Pydantic e contratos MCP", "preference");
+    dreamsDb.insertMemory("agent:architect", "Architect cuida da alocação de memória do serviço de inferência", "learning");
+    dreamsDb.insertMemory("agent:bob", "Bob valida schemas Pydantic e contratos MCP", "preference");
 
     cycle.updateProjections();
 
     const collectiveMd = path.join(e2eDir, "collective", "COLLECTIVE_MEMORY.md");
-    const kaelMd = path.join(e2eDir, "personas", "kael.md");
-    const tulioMd = path.join(e2eDir, "personas", "tulio.md");
+    const architectMd = path.join(e2eDir, "personas", "architect.md");
+    const bobMd = path.join(e2eDir, "personas", "bob.md");
 
     expect(fs.existsSync(collectiveMd)).toBe(true);
-    expect(fs.existsSync(kaelMd)).toBe(true);
-    expect(fs.existsSync(tulioMd)).toBe(true);
+    expect(fs.existsSync(architectMd)).toBe(true);
+    expect(fs.existsSync(bobMd)).toBe(true);
 
-    const kaelContent = fs.readFileSync(kaelMd, "utf-8");
-    expect(kaelContent).toContain("Kael cuida da alocação de VRAM");
+    const architectContent = fs.readFileSync(architectMd, "utf-8");
+    expect(architectContent).toContain("Architect cuida da alocação de memória");
 
-    const tulioContent = fs.readFileSync(tulioMd, "utf-8");
-    expect(tulioContent).toContain("Túlio valida schemas Pydantic");
+    const bobContent = fs.readFileSync(bobMd, "utf-8");
+    expect(bobContent).toContain("Bob valida schemas Pydantic");
   });
 });
 
@@ -815,15 +815,15 @@ describe("DreamsDB — Resiliência de busca FTS5, triggers e contadores", () =>
   });
 
   test("Recall incrementa recall_count e atualiza last_reinforced", () => {
-    ftsDb.insertMemory("agent:clara", "Clara executa suite deterministica sem mocks", "learning");
-    const before = ftsDb.getMemoriesByScope("agent:clara")[0];
+    ftsDb.insertMemory("agent:reviewer", "Reviewer executa suite deterministica sem mocks", "learning");
+    const before = ftsDb.getMemoriesByScope("agent:reviewer")[0];
     expect(before.recall_count).toBe(0);
 
-    const recalled = ftsDb.recall("deterministica", "agent:clara");
+    const recalled = ftsDb.recall("deterministica", "agent:reviewer");
     expect(recalled.length).toBe(1);
     expect(recalled[0].recall_count).toBe(1);
 
-    const after = ftsDb.getMemoriesByScope("agent:clara")[0];
+    const after = ftsDb.getMemoriesByScope("agent:reviewer")[0];
     expect(after.recall_count).toBe(1);
   });
 });
@@ -841,7 +841,7 @@ describe("Síntese Real de Ponta a Ponta via IA (Fallback Gemini 3.8 Flash Antig
 
     try {
       const dialogue = [
-        "[2026-10-09T16:00:00Z] user: Clara, garanta que todos os testes rodem contra SQLite isolado em /tmp.",
+        "[2026-10-09T16:00:00Z] user: Reviewer, garanta que todos os testes rodem contra SQLite isolado em /tmp.",
         "[2026-10-09T16:00:15Z] assistant: Entendido, todos os testes de integração do Dreams usam diretórios temporários únicos em /tmp.",
       ].join("\n");
 
@@ -856,7 +856,7 @@ describe("Síntese Real de Ponta a Ponta via IA (Fallback Gemini 3.8 Flash Antig
       expect(result.error).toBeNull();
 
       for (const mem of result.memories) {
-        expect(["collective", "agent:clara"].some(s => mem.scope === s || mem.scope.startsWith("agent:"))).toBe(true);
+        expect(["collective", "agent:reviewer"].some(s => mem.scope === s || mem.scope.startsWith("agent:"))).toBe(true);
         expect(["learning", "decision", "pitfall", "preference"]).toContain(mem.category);
         expect(mem.fact.length).toBeGreaterThanOrEqual(10);
         realDb.insertMemory(mem.scope, mem.fact, mem.category);
@@ -875,7 +875,7 @@ describe("Síntese Real de Ponta a Ponta via IA (Fallback Gemini 3.8 Flash Antig
 });
 
 // ===========================================================================
-// TICKET-DREAMS-03 (Frentes A + B) — Suíte determinística do SDET (Hugo).
+// TICKET-DREAMS-03 (Frentes A + B) — Suíte determinística do SDET (Test Engineer).
 //
 // Sem mocks: exercita SQLite REAL (bun:sqlite) em arquivos isolados sob /tmp,
 // o tokenizer FTS5 real, o sanitizador real e o SleepCycle real. A suíte é
@@ -914,7 +914,7 @@ describe("TICKET-DREAMS-03A — Robustez FTS5, folding de acentos e dual-write",
   test("folding de acentos: 'inferencia' e 'inferência' casam o MESMO registro", () => {
     const id = db.insertMemory(
       "collective",
-      "A inferência local do Laya usa RLCD sem acento no indice",
+      "A inferência local do motor usa recursos sem acento no indice",
       "learning"
     );
 
@@ -929,22 +929,22 @@ describe("TICKET-DREAMS-03A — Robustez FTS5, folding de acentos e dual-write",
   });
 
   test("sanitizeFts5Query neutraliza ':' '-' '*' '(' '/' '&' e aspas", () => {
-    expect(sanitizeFts5Query("agent:dante")).toBe('"agent" "dante"');
+    expect(sanitizeFts5Query("agent:lead")).toBe('"agent" "lead"');
     expect(sanitizeFts5Query("ensemble-room")).toBe('"ensemble" "room"');
     expect(sanitizeFts5Query("(c/d) * &")).toBe('"c" "d"');
-    expect(sanitizeFts5Query('Laya "RLCD"')).toBe('"Laya" "RLCD"');
+    expect(sanitizeFts5Query('Motor "local"')).toBe('"Motor" "local"');
     expect(sanitizeFts5Query("***")).toBe("");
     expect(sanitizeFts5Query("")).toBe("");
     expect(sanitizeFts5Query("!!! ... ---")).toBe("");
   });
 
-  test("recall com ':' (agent:dante) e '-' (ensemble-room) NÃO lança e acha o fato", () => {
-    db.insertMemory("agent:dante", "Escopo agent:dante orquestra o ensemble room", "decision");
+  test("recall com ':' (agent:lead) e '-' (ensemble-room) NÃO lança e acha o fato", () => {
+    db.insertMemory("agent:lead", "Escopo agent:lead orquestra o ensemble room", "decision");
 
     let viaColon: any[] = [];
-    expect(() => { viaColon = db.recall("agent:dante"); }).not.toThrow();
+    expect(() => { viaColon = db.recall("agent:lead"); }).not.toThrow();
     expect(viaColon.length).toBe(1);
-    expect(viaColon[0].fact).toContain("agent:dante");
+    expect(viaColon[0].fact).toContain("agent:lead");
 
     let viaHifen: any[] = [];
     expect(() => { viaHifen = db.recall("ensemble-room"); }).not.toThrow();
@@ -952,23 +952,23 @@ describe("TICKET-DREAMS-03A — Robustez FTS5, folding de acentos e dual-write",
     expect(viaHifen[0].fact).toContain("ensemble room");
   });
 
-  test("MATCH CRU com 'agent:dante' lança fts5 syntax error — prova que o sanitizador é necessário", () => {
+  test("MATCH CRU com 'agent:lead' lança fts5 syntax error — prova que o sanitizador é necessário", () => {
     // Sem o sanitizador, ':' é interpretado como filtro de coluna inexistente.
     // Este canário garante que o teste acima exercita um caminho real de risco.
     expect(() =>
-      raw.query("SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?").all("agent:dante")
+      raw.query("SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?").all("agent:lead")
     ).toThrow();
   });
 
   test("touchRecall incrementa recall_count e atualiza last_reinforced", () => {
-    const id = db.insertMemory("agent:clara", "Clara roda a suite deterministica real", "learning");
-    const before = db.getMemoriesByScope("agent:clara", 10).find((m) => m.id === id)!;
+    const id = db.insertMemory("agent:reviewer", "Reviewer roda a suite deterministica real", "learning");
+    const before = db.getMemoriesByScope("agent:reviewer", 10).find((m) => m.id === id)!;
     expect(before.recall_count).toBe(0);
 
-    const recalled = db.recall("deterministica", "agent:clara");
+    const recalled = db.recall("deterministica", "agent:reviewer");
     expect(recalled.length).toBe(1);
 
-    const after = db.getMemoriesByScope("agent:clara", 10).find((m) => m.id === id)!;
+    const after = db.getMemoriesByScope("agent:reviewer", 10).find((m) => m.id === id)!;
     expect(after.recall_count).toBe(1);
     expect(new Date(after.last_reinforced).getTime()).toBeGreaterThanOrEqual(
       new Date(before.last_reinforced).getTime()
@@ -1040,7 +1040,7 @@ describe("TICKET-DREAMS-03A — Dual-write dream_learn -> dream_recall no MESMO 
   test("dream_learn grava JSONL E torna o fato consultável no mesmo turno (db injetado)", () => {
     const dailyDir = path.join(dir, "daily");
     const ret = dream_learn(
-      { scope: "collective", fact: "Maiteux prefere determinismo nos testes", category: "preference" },
+      { scope: "collective", fact: "A equipe prefere determinismo nos testes", category: "preference" },
       { dailyDir, db }
     );
     expect(typeof ret).toBe("string");
@@ -1050,7 +1050,7 @@ describe("TICKET-DREAMS-03A — Dual-write dream_learn -> dream_recall no MESMO 
     const lines = fs.readFileSync(path.join(dailyDir, logFile), "utf-8").trim().split("\n");
     expect(lines.length).toBe(1);
     const parsed = JSON.parse(lines[0]);
-    expect(parsed.fact).toBe("Maiteux prefere determinismo nos testes");
+    expect(parsed.fact).toBe("A equipe prefere determinismo nos testes");
     expect(parsed.scope).toBe("collective");
 
     // Camada 2: dual-write síncrono no SQLite — recall imediato, sem ciclo de sono.
@@ -1067,7 +1067,7 @@ describe("TICKET-DREAMS-03A — Dual-write dream_learn -> dream_recall no MESMO 
     const dailyDir = path.join(dir, "daily_retro");
     expect(() =>
       dream_learn(
-        { scope: "agent:tales", fact: "Aprendizado apenas JSONL sem banco", category: "learning" },
+        { scope: "agent:engineer", fact: "Aprendizado apenas JSONL sem banco", category: "learning" },
         { dailyDir }
       )
     ).not.toThrow();

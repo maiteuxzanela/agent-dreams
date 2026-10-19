@@ -123,7 +123,7 @@ export ONLINE
 # Asseguramos que não há rotas para modelos locais setando a variável de ambiente.
 # Qualquer chamada para o REM Sleep (síntese) deverá usar exclusivamente modelos de nuvem.
 export OLLAMA_HOST="127.0.0.1:99999" # Invalida fallback acidental para Ollama
-export CUDA_VISIBLE_DEVICES=""       # Oculta a GTX 1050 Ti Pascal do processo de script caso use Python acidentalmente.
+export CUDA_VISIBLE_DEVICES=""       # Oculta dispositivos GPU do processo caso algum subprocesso tente inferência local.
 export FORBID_LOCAL_INFERENCE="true"
 
 # 3. Execução por etapas com agregação semântica de exit code (C5).

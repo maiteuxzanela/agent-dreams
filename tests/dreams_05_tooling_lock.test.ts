@@ -1,5 +1,5 @@
 /**
- * TICKET-DREAMS-05 — Suíte determinística SDET (Hugo) — ZERO mocks.
+ * TICKET-DREAMS-05 — Suíte determinística SDET (Test Engineer) — ZERO mocks.
  *
  * Frente 5A (tooling): package.json (devDeps typescript/@types/bun + scripts
  *   canônicos), remoção do package-lock.json, bun.lock regenerado e

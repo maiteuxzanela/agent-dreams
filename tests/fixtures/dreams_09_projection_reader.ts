@@ -8,7 +8,7 @@
  *
  * Se o escritor NÃO for atômico (truncate in-place / write parcial), o reader
  * observa `size 0` ou conteúdo "rasgado" (torn) e o contador é incrementado —
- * o que falha a suíte do Hugo. Com `write-temp + rename(2)`, nenhuma dessas
+ * o que falha a suíte do engenheiro de testes. Com `write-temp + rename(2)`, nenhuma dessas
  * condições é observável: ou o reader vê A inteiro, ou B inteiro.
  *
  * Saída (stdout): `PROJ_READER_RESULT:{...}` — JSON de uma linha.

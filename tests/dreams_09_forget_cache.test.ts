@@ -1,5 +1,5 @@
 /**
- * TICKET-DREAMS-09 — Suíte determinística SDET (Hugo).
+ * TICKET-DREAMS-09 — Suíte determinística SDET (Test Engineer).
  *
  * Cobre as duas frentes consolidadas:
  *   Card A — src/core/sleep_cycle.ts   : projeções atômicas POSIX (write-temp+rename)
@@ -116,7 +116,7 @@ describe("[DREAMS-09-B] forget <id> — reatividade imediata em disco (subproces
       "decision",
       4.0
     );
-    db.insertMemory("agent:hugo", "Hugo escreve testes deterministicos reais", "learning", 2.0);
+    db.insertMemory("agent:alice", "Alice escreve testes deterministicos reais", "learning", 2.0);
     db.close();
 
     // 2. Projeção STALE em disco (como o Deep Sleep a deixou há horas): contém o
@@ -134,8 +134,8 @@ describe("[DREAMS-09-B] forget <id> — reatividade imediata em disco (subproces
       "utf8"
     );
     fs.writeFileSync(
-      path.join(personasDir, "hugo.md"),
-      "<!-- INDIVIDUAL MEMORY FOR HUGO -->\n- [LEARNING] Hugo escreve testes deterministicos reais\n",
+      path.join(personasDir, "alice.md"),
+      "<!-- INDIVIDUAL MEMORY FOR ALICE -->\n- [LEARNING] Alice escreve testes deterministicos reais\n",
       "utf8"
     );
     fs.writeFileSync(
@@ -160,9 +160,9 @@ describe("[DREAMS-09-B] forget <id> — reatividade imediata em disco (subproces
 
     // persona órfã expurgada; persona viva regravada com o fato corrente.
     expect(fs.existsSync(path.join(personasDir, "ghost.md"))).toBe(false);
-    expect(fs.existsSync(path.join(personasDir, "hugo.md"))).toBe(true);
-    expect(fs.readFileSync(path.join(personasDir, "hugo.md"), "utf8")).toContain(
-      "Hugo escreve testes deterministicos reais"
+    expect(fs.existsSync(path.join(personasDir, "alice.md"))).toBe(true);
+    expect(fs.readFileSync(path.join(personasDir, "alice.md"), "utf8")).toContain(
+      "Alice escreve testes deterministicos reais"
     );
 
     // 4. Verificação independente: a linha sumiu do SQLite.
@@ -205,7 +205,7 @@ describe("[DREAMS-09-B] list — paginação e filtro no SQLite (subprocesso rea
       db.insertMemory("collective", `Fato coletivo numero ${i}`, "learning", i);
     }
     for (let i = 1; i <= 5; i++) {
-      db.insertMemory("agent:hugo", `Fato da persona hugo numero ${i}`, "pitfall", 100 + i);
+      db.insertMemory("agent:alice", `Fato da persona alice numero ${i}`, "pitfall", 100 + i);
     }
     db.close();
   }
@@ -226,7 +226,7 @@ describe("[DREAMS-09-B] list — paginação e filtro no SQLite (subprocesso rea
     const lines = memLines(out(proc));
     expect(lines.length).toBe(3);
     // Maiores scores são as personas (100+i): 105, 104, 103 primeiro.
-    expect(lines[0]).toContain("[agent:hugo]");
+    expect(lines[0]).toContain("[agent:alice]");
     expect(lines[0]).toContain("score 105.00");
     expect(lines[1]).toContain("score 104.00");
     expect(lines[2]).toContain("score 103.00");
@@ -235,11 +235,11 @@ describe("[DREAMS-09-B] list — paginação e filtro no SQLite (subprocesso rea
   test("--scope filtra E pagina (interseção correta, ordem por score)", () => {
     const home = mkTmp("dreams_09_list_scope_");
     seedScored(home);
-    const proc = runCli(["list", "--scope", "agent:hugo", "--limit=2"], home);
+    const proc = runCli(["list", "--scope", "agent:alice", "--limit=2"], home);
     expect(proc.exitCode).toBe(0);
     const lines = memLines(out(proc));
     expect(lines.length).toBe(2);
-    for (const l of lines) expect(l).toContain("[agent:hugo]");
+    for (const l of lines) expect(l).toContain("[agent:alice]");
     expect(lines[0]).toContain("score 105.00");
     expect(lines[1]).toContain("score 104.00");
   });
@@ -292,9 +292,9 @@ describe("[DREAMS-09-B] DreamsDB.listMemories — contrato SQL nativo", () => {
     const db = new DreamsDB(path.join(base, "dreams.db"));
     db.insertMemory("collective", "coletiva pitfall", "pitfall", 4.0);
     db.insertMemory("collective", "coletiva decision", "decision", 3.0);
-    db.insertMemory("agent:hugo", "hugo pitfall", "pitfall", 5.0);
+    db.insertMemory("agent:alice", "alice pitfall", "pitfall", 5.0);
 
-    expect(db.listMemories({ scope: "agent:hugo" }).length).toBe(1);
+    expect(db.listMemories({ scope: "agent:alice" }).length).toBe(1);
     expect(db.listMemories({ category: "pitfall" }).length).toBe(2);
     const combo = db.listMemories({ scope: "collective", category: "pitfall" });
     expect(combo.length).toBe(1);
@@ -337,16 +337,16 @@ describe("[DREAMS-09-A] updateProjections — escrita atômica write-temp+rename
     const base = mkTmp("dreams_09_atomic_");
     const db = new DreamsDB(path.join(base, "dreams.db"));
     db.insertMemory("collective", "Fato para projecao atomica coletiva", "learning", 2.0);
-    db.insertMemory("agent:hugo", "Fato da persona hugo na projecao", "pitfall", 1.5);
+    db.insertMemory("agent:alice", "Fato da persona alice na projecao", "pitfall", 1.5);
     const sc = new SleepCycle(db, { baseDir: base, captureDialogue: false });
     sc.updateProjections();
 
     const cfile = path.join(base, "collective", "COLLECTIVE_MEMORY.md");
-    const pfile = path.join(base, "personas", "hugo.md");
+    const pfile = path.join(base, "personas", "alice.md");
     expect(fs.existsSync(cfile)).toBe(true);
     expect(fs.existsSync(pfile)).toBe(true);
     expect(fs.readFileSync(cfile, "utf8")).toContain("Fato para projecao atomica coletiva");
-    expect(fs.readFileSync(pfile, "utf8")).toContain("Fato da persona hugo na projecao");
+    expect(fs.readFileSync(pfile, "utf8")).toContain("Fato da persona alice na projecao");
 
     const leftovers = [
       ...fs.readdirSync(path.join(base, "collective")),
@@ -462,29 +462,29 @@ describe("[DREAMS-09-A] cache de sessão em prompt_injector (SQLite real, sem re
     const base = mkTmp("dreams_09_cache_");
     const db1 = path.join(base, "agent1.db");
     const db2 = path.join(base, "agent2.db");
-    writeSessionDb(db1, "ses_cache_x", "hugo");
-    writeSessionDb(db2, "ses_cache_x", "clara");
+    writeSessionDb(db1, "ses_cache_x", "alice");
+    writeSessionDb(db2, "ses_cache_x", "reviewer");
 
-    // 1ª leitura: SQLite real (db1) → hugo, memorizado.
-    expect(await resolveSessionAgent("ses_cache_x", null, db1)).toBe("hugo");
+    // 1ª leitura: SQLite real (db1) → alice, memorizado.
+    expect(await resolveSessionAgent("ses_cache_x", null, db1)).toBe("alice");
     // 2ª leitura aponta para OUTRO banco (agente diferente): se tocasse o SQLite
-    // devolveria 'clara'; devolve 'hugo' ⇒ veio do cache, sem I/O.
-    expect(await resolveSessionAgent("ses_cache_x", null, db2)).toBe("hugo");
+    // devolveria 'reviewer'; devolve 'alice' ⇒ veio do cache, sem I/O.
+    expect(await resolveSessionAgent("ses_cache_x", null, db2)).toBe("alice");
     // clearAgentSessionCache() força releitura → agora vê o db2.
     clearAgentSessionCache();
-    expect(await resolveSessionAgent("ses_cache_x", null, db2)).toBe("clara");
+    expect(await resolveSessionAgent("ses_cache_x", null, db2)).toBe("reviewer");
   });
 
   test("após cachear, apagar o arquivo SQLite não afeta a resolução (prova de não-leitura)", async () => {
     const base = mkTmp("dreams_09_cache_del_");
     const dbp = path.join(base, "sessions.db");
-    writeSessionDb(dbp, "ses_del", "hugo");
+    writeSessionDb(dbp, "ses_del", "alice");
 
-    expect(await resolveSessionAgent("ses_del", null, dbp)).toBe("hugo");
+    expect(await resolveSessionAgent("ses_del", null, dbp)).toBe("alice");
     for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(dbp + suffix, { force: true });
 
     // Cache ainda serve o valor memorizado, mesmo com o arquivo destruído.
-    expect(await resolveSessionAgent("ses_del", null, dbp)).toBe("hugo");
+    expect(await resolveSessionAgent("ses_del", null, dbp)).toBe("alice");
     clearAgentSessionCache();
     expect(await resolveSessionAgent("ses_del", null, dbp)).toBeNull();
   });
@@ -496,40 +496,40 @@ describe("[DREAMS-09-A] cache de sessão em prompt_injector (SQLite real, sem re
 
     expect(await resolveSessionAgent("ses_neg", null, dbp)).toBeNull();
     // A linha aparece depois; sem clear, o null cacheado continua valendo.
-    insertSessionRow(dbp, "ses_neg", "maya");
+    insertSessionRow(dbp, "ses_neg", "analyst");
     expect(await resolveSessionAgent("ses_neg", null, dbp)).toBeNull();
     clearAgentSessionCache();
-    expect(await resolveSessionAgent("ses_neg", null, dbp)).toBe("maya");
+    expect(await resolveSessionAgent("ses_neg", null, dbp)).toBe("analyst");
   });
 
   test("TTL expira a entrada (lazy eviction) e força releitura do SQLite", async () => {
     const base = mkTmp("dreams_09_cache_ttl_");
     const db1 = path.join(base, "a.db");
     const db2 = path.join(base, "b.db");
-    writeSessionDb(db1, "ses_ttl", "hugo");
-    writeSessionDb(db2, "ses_ttl", "clara");
+    writeSessionDb(db1, "ses_ttl", "alice");
+    writeSessionDb(db2, "ses_ttl", "reviewer");
 
-    expect(await resolveSessionAgent("ses_ttl", null, db1)).toBe("hugo");
+    expect(await resolveSessionAgent("ses_ttl", null, db1)).toBe("alice");
 
     // Avança o relógio REAL além do TTL: a entrada fica vencida.
     setSystemTime(Date.now() + AGENT_SESSION_CACHE_TTL_MS + 1000);
 
-    // Entrada expirada ⇒ lazily removida ⇒ relê o SQLite (db2) ⇒ 'clara'.
-    expect(await resolveSessionAgent("ses_ttl", null, db2)).toBe("clara");
+    // Entrada expirada ⇒ lazily removida ⇒ relê o SQLite (db2) ⇒ 'reviewer'.
+    expect(await resolveSessionAgent("ses_ttl", null, db2)).toBe("reviewer");
   });
 
   test("título do Ensemble tem precedência e também é cacheado (sem reabrir o banco)", async () => {
     const base = mkTmp("dreams_09_cache_title_");
     const db1 = path.join(base, "t1.db");
     const db2 = path.join(base, "t2.db");
-    writeSessionDb(db1, "ses_t", "dante", "clara (@clara teammate)");
-    writeSessionDb(db2, "ses_t", "dante", "Chat normal");
+    writeSessionDb(db1, "ses_t", "lead", "reviewer (@reviewer teammate)");
+    writeSessionDb(db2, "ses_t", "lead", "Chat normal");
 
-    expect(await resolveSessionAgent("ses_t", null, db1)).toBe("clara");
-    // Sem clear: continua 'clara' mesmo apontando para o db2 (sem title assinado).
-    expect(await resolveSessionAgent("ses_t", null, db2)).toBe("clara");
+    expect(await resolveSessionAgent("ses_t", null, db1)).toBe("reviewer");
+    // Sem clear: continua 'reviewer' mesmo apontando para o db2 (sem title assinado).
+    expect(await resolveSessionAgent("ses_t", null, db2)).toBe("reviewer");
     clearAgentSessionCache();
-    expect(await resolveSessionAgent("ses_t", null, db2)).toBe("dante");
+    expect(await resolveSessionAgent("ses_t", null, db2)).toBe("lead");
   });
 });
 

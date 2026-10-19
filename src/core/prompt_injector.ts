@@ -293,7 +293,7 @@ function isValidAgentName(agentName: unknown): agentName is string {
 /**
  * Regex que captura o nome do agente após o `@` quando o título traz a
  * assinatura de teammate/subagent do Ensemble
- * (ex.: `clara (@clara teammate)`, `Auditoria Diana (@diana subagent)`).
+ * (ex.: `reviewer (@reviewer teammate)`, `Auditoria Independente (@auditor subagent)`).
  */
 const TITLE_AGENT_RE = /@([A-Za-z0-9._-]+)\s+(?:teammate|subagent)/i;
 
@@ -301,7 +301,7 @@ const TITLE_AGENT_RE = /@([A-Za-z0-9._-]+)\s+(?:teammate|subagent)/i;
  * Extrai o nome do agente a partir do título da sessão.
  *
  * Em sessões do Ensemble, o `session.agent` no SQLite herda o nome do lead
- * (`dante`, `valerio`), mas o título sempre traz a assinatura real do
+ * (`lead`, `coordinator`), mas o título sempre traz a assinatura real do
  * teammate/subagent no padrão `@<agent> (teammate|subagent)`. Esta função
  * pura extrai esse nome e o valida com as mesmas regras de `normalizeAgent`.
  *
@@ -319,7 +319,7 @@ export function extractAgentFromTitle(title: unknown): string | null {
 /**
  * Normaliza um nome de agente vindo de fonte externa (DB/SDK).
  *
- * Aceita formatos como `dante`, `agent:dante`, `opencode/dante`; descarta
+ * Aceita formatos como `developer`, `agent:developer`, `opencode/developer`; descarta
  * vazios, não-strings e nomes que não passam em `AGENT_NAME_RE`.
  */
 function normalizeAgent(raw: unknown): string | null {
@@ -416,7 +416,7 @@ function pickAgentFromMessages(value: any): string | null {
  * Ordem: `client.session.get` → `client.session.messages`.
  * Dentro de cada chamada, o título (assinatura `@teammate`/`@subagent` do
  * Ensemble) tem PRECEDÊNCIA sobre `session.agent`, que em sessões criadas
- * pelo lead herda o nome errado (`dante`, `valerio`).
+ * pelo lead herda o nome errado (`lead`, `coordinator`).
  * Qualquer erro é engolido (fail-soft) e a tentativa seguinte é usada.
  */
 async function readAgentViaClient(sessionID: string, client: any): Promise<string | null> {

@@ -59,7 +59,7 @@ export const FACT_SIMILARITY_THRESHOLD = 0.8;
  * (NFD) e de toda pontuação, colapsando espaços. Determinística e pura.
  *
  * @example
- *   normalizeFactText("Inferência, (c/d) & Laya!") // => "inferencia c d laya"
+ *   normalizeFactText("Inferência, (c/d) & Motor!") // => "inferencia c d motor"
  */
 export function normalizeFactText(fact: string): string {
   if (typeof fact !== "string") return "";
@@ -402,7 +402,7 @@ export class DreamsDB {
 
   public recall(queryText: string, scope?: string, category?: string, limit: number = 5): MemoryRecord[] {
     // TICKET-DREAMS-03 (Frente A): higieniza a query ANTES do MATCH FTS5.
-    // Identificadores como 'agent:dante' ou hífens ('ensemble-room') seriam
+    // Identificadores como 'agent:developer' ou hífens ('ensemble-room') seriam
     // interpretados como operador de coluna/negação pelo FTS5 e lançariam erro
     // de sintaxe, forçando (ou piorando) o fallback. O sanitizador converte a
     // query crua em termos literais e seguros.
@@ -544,10 +544,10 @@ export class DreamsDB {
  * TICKET-DREAMS-03 (Frente A) — Sanitizador de query para SQLite FTS5.
  *
  * O dialeto MATCH do FTS5 interpreta muitos caracteres como sintaxe: `:` (filtro
- * de coluna, ex.: `agent:dante`), `-` (negação, ex.: `ensemble-room`), `*`
+ * de coluna, ex.: `agent:developer`), `-` (negação, ex.: `ensemble-room`), `*`
  * (prefixo), `"` (frase), `AND/OR/NOT`, parênteses, `^`, `.`, etc. Identificadores
  * legítimos de memória — escopos `agent:<nome>`, nomes com hífen como
- * `ensemble-room` ou `open-jev` — disparam `fts5: syntax error` e derrubam a
+ * `ensemble-room` ou `open-tool` — disparam `fts5: syntax error` e derrubam a
  * busca no fallback LIKE.
  *
  * Estratégia: extrai apenas os tokens alfanuméricos Unicode (`\p{L}`/`\p{N}`),
@@ -559,9 +559,9 @@ export class DreamsDB {
  * retorna `""`; o chamador (`recall`) então recorre ao fallback LIKE.
  *
  * @example
- *   sanitizeFts5Query("agent:dante")   // => '"agent" "dante"'
+ *   sanitizeFts5Query("agent:developer")   // => '"agent" "developer"'
  *   sanitizeFts5Query("ensemble-room") // => '"ensemble" "room"'
- *   sanitizeFts5Query('Laya "RLCD"')   // => '"Laya" "RLCD"'
+ *   sanitizeFts5Query('AST "parser"')  // => '"AST" "parser"'
  *   sanitizeFts5Query("(c/d) * &")     // => '"c" "d"'
  *   sanitizeFts5Query("***")           // => ''
  */

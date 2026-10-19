@@ -52,7 +52,7 @@ Quando o plugin está carregado no runtime do OpenCode, os agentes têm acesso i
 1. **`dream_learn`**:
    * Permite que agentes e orquestradores registrem lições ativamente durante a vigília.
    * **Categorias:** `preference`, `decision`, `pitfall`, `learning`.
-   * **Escopo:** `collective` (regras gerais do ecossistema) ou `agent:<nome>` (específico da persona, ex.: `agent:silas`, `agent:clara`).
+   * **Escopo:** `collective` (regras gerais do ecossistema) ou `agent:<nome>` (específico da persona, ex.: `agent:developer`, `agent:reviewer`, `agent:architect`).
 
 2. **`dream_recall`**:
    * Busca instantânea por relevância textual via **SQLite FTS5**.
@@ -201,8 +201,23 @@ new MimoSynthesizer({
 > systemd apenas as definem como blindagem defensiva para impedir qualquer
 > inferência local acidental em subprocessos.
 
+#### B. FinOps & Hardware Guidelines (Opcional)
 
-#### B. Registro do Plugin no OpenCode
+O ciclo REM usa **exclusivamente modelos em nuvem** e não exige hardware
+dedicado. Para ambientes com FinOps restrito — ou que desejam blindar o host
+contra inferência local acidental — o wrapper e o unit systemd definem variáveis
+defensivas:
+
+| Variável | Papel |
+|---|---|
+| `OLLAMA_HOST=127.0.0.1:99999` | invalida endpoints locais de inferência. |
+| `CUDA_VISIBLE_DEVICES=` | oculta dispositivos GPU de subprocessos. |
+| `FORBID_LOCAL_INFERENCE=true` | sinaliza bloqueio de inferência local. |
+
+Nenhuma delas é lida pelo plugin: são blindagem operacional. Aceleradores
+locais são **opcionais** e não fazem parte do caminho crítico de consolidação.
+
+#### C. Registro do Plugin no OpenCode
 Adicione o plugin ao seu `~/.config/opencode/opencode.json` (ou `opencode.jsonc`):
 
 ```json
@@ -213,7 +228,7 @@ Adicione o plugin ao seu `~/.config/opencode/opencode.json` (ou `opencode.jsonc`
 }
 ```
 
-#### C. Injeção no `AGENTS.md` (Para seus agentes lerem as memórias)
+#### D. Injeção no `AGENTS.md` (Para seus agentes lerem as memórias)
 Adicione no início do seu arquivo de governança (`AGENTS.md` ou `SYSTEM_PROMPT.md`):
 
 ```markdown
@@ -223,6 +238,114 @@ Adicione no início do seu arquivo de governança (`AGENTS.md` ou `SYSTEM_PROMPT
 > - **Memória Individual da sua Persona:** `~/.config/opencode/dreams/personas/<seu_nome>.md`  
 > - **Busca Ativa:** Utilize `dream_recall(query: "...")` para resgatar decisões arquiteturais e armadilhas.
 ```
+
+---
+
+## 🔌 Dual-Entrypoint: Plugin OpenCode + MCP Server Universal
+
+O Chamber Dream é consumido por **dois entrypoints independentes**, ambos
+compartilhando o mesmo banco SQLite e as mesmas regras de memória:
+
+| Entrypoint | Quando usar | Como iniciar |
+|---|---|---|
+| **Plugin nativo OpenCode** | Sessões do OpenCode (tools `dream_learn`/`dream_recall` no runtime) | Registro no `opencode.json` (ver acima) |
+| **MCP Server universal** | Claude Desktop, Cursor, Windsurf e qualquer cliente MCP | `bunx --bun dreams-mcp` (transporte **stdio**) |
+
+### 1. Plugin nativo OpenCode
+
+Basta registrar o diretório do plugin no `~/.config/opencode/opencode.json`
+(ou `opencode.jsonc`), como mostrado na seção "Registro do Plugin no OpenCode".
+As ferramentas ficam disponíveis automaticamente para todos os agentes.
+
+### 2. MCP Server universal (`dreams-mcp`)
+
+O pacote expõe o binário **`dreams-mcp`** (entrypoint `bin/dreams-mcp.js`, com
+shebang Bun, que carrega `src/mcp/server.ts`). O servidor fala **JSON-RPC
+newline-delimited sobre stdio**: `stdout` é exclusivo do protocolo e os logs vão
+para `stderr`.
+
+```bash
+# Forma recomendada (Bun já resolve o shebang)
+bunx --bun dreams-mcp
+
+# Via npx — requer Bun instalado e no PATH (o shebang é `#!/usr/bin/env bun`)
+npx dreams-mcp
+
+# A partir de um checkout local
+bun ./bin/dreams-mcp.js
+```
+
+#### Tools MCP expostas
+
+* **`dream_learn`** — persiste uma memória atômica.
+  * `fact` (string, obrigatório, mín. 1 char);
+  * `category` (opcional): `learning` (default) | `decision` | `pitfall` | `preference`;
+  * `scope` (opcional): `collective` (default) ou `agent:<nome>` (`[a-zA-Z0-9_-]`).
+  * O `fact` passa por `redactSecrets()` **antes** de ser gravado no SQLite e no
+    JSONL diário (`<dir>/daily/log_<YYYY-MM-DD>.jsonl`, com `synced_to_db: true`).
+* **`dream_recall`** — busca híbrida FTS5 com fallback `LIKE`.
+  * `query` (string, obrigatório);
+  * `scope` (opcional, match exato), `category` (opcional);
+  * `limit` (opcional, inteiro 1..100, default 10).
+
+Erros de tool retornam `isError: true` com `{ "status": "error", "error": "..." }`.
+
+#### Variáveis de ambiente do servidor MCP
+
+| Precedência | Variável | Efeito |
+|---|---|---|
+| 1ª | `DREAMS_DB_PATH` | Caminho explícito do arquivo SQLite (o diretório do JSONL diário continua seguindo `DREAMS_DIR` quando definido). |
+| 2ª | `DREAMS_DIR` | Diretório raiz: banco em `<dir>/dreams.db` (quando `DREAMS_DB_PATH` não é definido) e diário em `<dir>/daily/`. |
+| default | — | `~/.config/opencode/dreams/dreams.db`. |
+
+#### Configuração em clientes MCP
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`
+no macOS ou `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
+
+```json
+{
+  "mcpServers": {
+    "dreams": {
+      "command": "bunx",
+      "args": ["--bun", "dreams-mcp"]
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json` ou `.cursor/mcp.json` na raiz do projeto):
+
+```json
+{
+  "mcpServers": {
+    "dreams": {
+      "command": "bunx",
+      "args": ["--bun", "dreams-mcp"],
+      "env": {
+        "DREAMS_DIR": "~/.config/opencode/dreams"
+      }
+    }
+  }
+}
+```
+
+**Windsurf** (`~/.codeium/windsurf/mcp_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "dreams": {
+      "command": "bunx",
+      "args": ["--bun", "dreams-mcp"]
+    }
+  }
+}
+```
+
+> 💡 Se preferir `npx`, troque `"command": "bunx", "args": ["--bun", "dreams-mcp"]`
+> por `"command": "npx", "args": ["-y", "dreams-mcp"]` — o pacote continua
+> exigindo o Bun disponível no `PATH` por causa do shebang.
 
 ---
 
@@ -308,7 +431,7 @@ Comandos adicionados para inspeção e correção manual das memórias ativas
 # Lista as memórias ativas: id, escopo, categoria, score e fato.
 # Ordena por score desc por padrão; --scope filtra um escopo e --limit limita.
 bun run src/cli.ts list
-bun run src/cli.ts list --scope agent:cris --limit 5
+bun run src/cli.ts list --scope agent:developer --limit 5
 bun run src/cli.ts list --scope=collective --limit=10
 
 # Remove uma memória específica pelo ID numérico (exibido no `list`).
@@ -332,11 +455,11 @@ bun run src/cli.ts forget 42
 O projeto é construído sob a diretriz estrita **Anti-Mock Fail-Fast** — 100% dos testes operam contra bancos SQLite reais em diretórios temporários, sem mocks de framework:
 
 ```bash
-# Executa todos os testes da suíte em modo offline determinístico
-DREAMS_OFFLINE=1 bun test
+# Executa todos os testes da suíte (o script já define DREAMS_OFFLINE=1)
+bun run test
 
 # Executa o typecheck rigoroso do TypeScript
-bun x tsc --noEmit
+bun run typecheck
 ```
 
 ---

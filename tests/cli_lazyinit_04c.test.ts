@@ -1,6 +1,6 @@
 /**
  * TICKET-DREAMS-04 — Frente 4C
- * Suíte determinística (SDET / Hugo) para:
+ * Suíte determinística (SDET / Test Engineer) para:
  *   - src/index.ts  → lazy init / singleton do DreamsDB (getDB/closeDB/isDBInitialized)
  *   - src/cli.ts    → parseListArgs/formatMemoryLine (puros) e comandos forget/list
  *
@@ -57,7 +57,7 @@ describe("[4C] cli.ts parseListArgs (puro)", () => {
   });
 
   test("--scope aceita as formas separada e com '='", () => {
-    expect(parseListArgs(["--scope", "agent:hugo"])).toEqual({ scope: "agent:hugo", limit: 20 });
+    expect(parseListArgs(["--scope", "agent:alice"])).toEqual({ scope: "agent:alice", limit: 20 });
     expect(parseListArgs(["--scope=collective"])).toEqual({ scope: "collective", limit: 20 });
   });
 
@@ -101,8 +101,8 @@ describe("[4C] cli.ts formatMemoryLine (puro)", () => {
   });
 
   test("defaults determinísticos para id/score ausentes", () => {
-    const line = formatMemoryLine({ scope: "agent:hugo", category: "pitfall", fact: "" } as any);
-    expect(line).toBe("#0 [agent:hugo] pitfall (score 0.00) ");
+    const line = formatMemoryLine({ scope: "agent:alice", category: "pitfall", fact: "" } as any);
+    expect(line).toBe("#0 [agent:alice] pitfall (score 0.00) ");
   });
 });
 
@@ -146,7 +146,7 @@ describe("[4C] cli.ts forget/list (HOME isolado, SQLite real)", () => {
     const db = new DreamsDB(dbPath);
     const idLow = db.insertMemory("collective", "Fato coletivo de pontuacao baixa", "learning", 1.0);
     const idHigh = db.insertMemory("collective", "Decisao coletiva de pontuacao alta", "decision", 4.0);
-    const idMid = db.insertMemory("agent:hugo", "Preferencia pessoal de pontuacao media", "preference", 2.5);
+    const idMid = db.insertMemory("agent:alice", "Preferencia pessoal de pontuacao media", "preference", 2.5);
     db.close();
     return { idLow, idHigh, idMid };
   }
@@ -202,11 +202,11 @@ describe("[4C] cli.ts forget/list (HOME isolado, SQLite real)", () => {
   test("list --scope filtra pelo escopo informado", () => {
     const home = makeHome();
     const { idMid } = seed(home);
-    const proc = runCli(["list", "--scope", "agent:hugo"], home);
+    const proc = runCli(["list", "--scope", "agent:alice"], home);
     expect(proc.exitCode).toBe(0);
     const lines = memLines(out(proc));
     expect(lines.length).toBe(1);
     expect(lines[0].startsWith(`#${idMid}`)).toBe(true);
-    expect(lines[0]).toContain("[agent:hugo]");
+    expect(lines[0]).toContain("[agent:alice]");
   });
 });

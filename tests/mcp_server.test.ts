@@ -40,7 +40,8 @@ import { resolveDreamsPaths } from "../src/mcp/server";
 // Isolamento absoluto: FS + SQLite reais em diretório temporário exclusivo.
 // ---------------------------------------------------------------------------
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
-const MCP_BIN = path.join(REPO_ROOT, "bin", "dreams-mcp.js");
+const MCP_BIN = path.join(REPO_ROOT, "bin", "agent-dreams.js");
+const LEGACY_MCP_BIN = path.join(REPO_ROOT, "bin", "dreams-mcp.js");
 const TEST_BASE = fs.mkdtempSync(path.join(os.tmpdir(), "dreams_mcp_sdet_"));
 const DB_PATH = path.join(TEST_BASE, "dreams.db");
 const DAILY_DIR = path.join(TEST_BASE, "daily");
@@ -590,5 +591,15 @@ describe("HARNESS-45/F1 — resolveDreamsPaths", () => {
     expect(resolved.dbPath).toBe("/home/sdet/.config/opencode/dreams/dreams.db");
     expect(resolved.dir).toBe("/home/sdet/.config/opencode/dreams");
     expect(resolved.dailyDir).toBe("/home/sdet/.config/opencode/dreams/daily");
+  });
+
+  test("alias legado bin/dreams-mcp.js e novo bin/agent-dreams.js existem e são executáveis", () => {
+    expect(fs.existsSync(MCP_BIN)).toBe(true);
+    expect(fs.existsSync(LEGACY_MCP_BIN)).toBe(true);
+    const mcpStat = fs.statSync(MCP_BIN);
+    const legacyStat = fs.statSync(LEGACY_MCP_BIN);
+    // Bits de execução presentes
+    expect((mcpStat.mode & 0o111) !== 0).toBe(true);
+    expect((legacyStat.mode & 0o111) !== 0).toBe(true);
   });
 });

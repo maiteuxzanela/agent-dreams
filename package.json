@@ -1,7 +1,7 @@
 {
-  "name": "opencode-plugin-dreams",
+  "name": "agent-dreams",
   "version": "1.0.0",
-  "description": "Dreams memory consolidation plugin for OpenCode",
+  "description": "Cognitive sleep cycle & universal persistent memory for AI agents (OpenCode plugin + MCP server)",
   "type": "module",
   "main": "src/index.ts",
   "module": "src/index.ts",
@@ -10,17 +10,31 @@
     "./mcp": "./src/mcp/server.ts"
   },
   "bin": {
-    "dreams-mcp": "./bin/dreams-mcp.js"
+    "agent-dreams": "./bin/agent-dreams.js",
+    "dreams-mcp": "./bin/agent-dreams.js"
   },
   "scripts": {
     "test": "DREAMS_OFFLINE=1 bun test",
     "typecheck": "tsc --noEmit"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maiteuxzanela/agent-dreams.git"
+  },
+  "homepage": "https://github.com/maiteuxzanela/agent-dreams#readme",
+  "bugs": {
+    "url": "https://github.com/maiteuxzanela/agent-dreams/issues"
+  },
+  "author": "Maiteux Zanela",
   "keywords": [
+    "agent-dreams",
+    "mcp",
+    "memory",
+    "ai-agents",
+    "persistent-memory",
+    "sleep-cycle",
     "opencode",
-    "plugin",
-    "dreams",
-    "memory"
+    "claude-desktop"
   ],
   "license": "MIT",
   "devDependencies": {

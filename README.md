@@ -1,8 +1,8 @@
-# 🌙 Chamber Dream (`opencode-plugin-dreams`)
+# 🌙 Agent Dreams (`agent-dreams`)
 
-Plugin oficial de **memória contínua, consolidação cognitiva e arquitetura de sono** para o ecossistema [OpenCode](https://opencode.ai).
+Biblioteca e servidor oficial de **memória contínua, consolidação cognitiva e arquitetura de sono** para o ecossistema de agentes de IA ([OpenCode](https://opencode.ai), Claude Desktop, Cursor, etc.).
 
-O **Chamber Dream** resolve o problema clássico de perda de contexto e amnésia entre sessões de LLM. Inspirado nas neurociências e no ciclo biológico do sono, o plugin ingere passivamente os diálogos reais de trabalho, destila aprendizados preditivos através de modelos cognitivos em nuvem e projeta regras ativas para os agentes operacionais sem sobrecarregar a janela de contexto.
+O **Agent Dreams** resolve o problema clássico de perda de contexto e amnésia entre sessões de LLM. Inspirado nas neurociências e no ciclo biológico do sono, o sistema ingere passivamente os diálogos reais de trabalho, destila aprendizados preditivos através de modelos cognitivos em nuvem e projeta regras ativas para os agentes operacionais sem sobrecarregar a janela de contexto.
 
 ---
 
@@ -246,41 +246,52 @@ Adicione no início do seu arquivo de governança (`AGENTS.md` ou `SYSTEM_PROMPT
 
 ## 🔌 Dual-Entrypoint: Plugin OpenCode + MCP Server Universal
 
-O Chamber Dream é consumido por **dois entrypoints independentes**, ambos
+O Agent Dreams é consumido por **dois entrypoints independentes**, ambos
 compartilhando o mesmo banco SQLite e as mesmas regras de memória:
 
 | Entrypoint | Quando usar | Como iniciar |
 |---|---|---|
 | **Plugin nativo OpenCode** | Sessões do OpenCode (tools `dream_learn`/`dream_recall` no runtime) | Registro no `opencode.json` (ver acima) |
-| **MCP Server universal** | Claude Desktop, Cursor, Windsurf e qualquer cliente MCP | `bun /caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js` (transporte **stdio**) |
+| **MCP Server universal** | Claude Desktop, Cursor, Windsurf e qualquer cliente MCP | `bunx agent-dreams` ou `npx agent-dreams` (transporte **stdio**) |
 
 ### 1. Plugin nativo OpenCode
 
-Basta registrar o diretório do plugin no `~/.config/opencode/opencode.json`
-(ou `opencode.jsonc`), como mostrado na seção "Registro do Plugin no OpenCode".
+Basta registrar o pacote no `~/.config/opencode/opencode.json`
+(ou `opencode.jsonc`):
+```json
+{
+  "plugins": [
+    "~/.config/opencode/plugins/opencode-plugin-dreams"
+  ]
+}
+```
 As ferramentas ficam disponíveis automaticamente para todos os agentes.
 
-### 2. MCP Server universal (`dreams-mcp`)
+### 2. MCP Server universal (`agent-dreams`)
 
-O pacote expõe o binário **`dreams-mcp`** (entrypoint `bin/dreams-mcp.js`, com
-shebang Bun, que carrega `src/mcp/server.ts`). O servidor fala **JSON-RPC
-newline-delimited sobre stdio**: `stdout` é exclusivo do protocolo e os logs vão
-para `stderr`.
+O pacote expõe o binário executável **`agent-dreams`** (com alias legado `dreams-mcp` mantido para compatibilidade). O servidor fala **JSON-RPC newline-delimited sobre stdio**: `stdout` é exclusivo do protocolo e os logs vão para `stderr`.
 
 ```bash
-# Checkout local — forma executável hoje (o pacote ainda não está publicado no npm)
-bun /caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js
+# Execução universal (via NPM registry):
+bunx agent-dreams
+# ou via npx:
+npx agent-dreams
 
-# Após publicar o pacote `opencode-plugin-dreams` no npm
-bunx --bun opencode-plugin-dreams
-# ou, explicitando o bin `dreams-mcp` do pacote:
-bunx -p opencode-plugin-dreams dreams-mcp
+# Checkout local (desenvolvimento):
+./bin/agent-dreams.js
 ```
 
-> ⚠️ **O pacote `opencode-plugin-dreams` ainda não está publicado no npm.** Por
-> isso `bunx`/`npx` com o nome do pacote só funcionam **após a publicação**.
-> Enquanto isso, use o caminho absoluto do checkout local. O nome `dreams-mcp`
-> é o **bin** exposto pelo pacote — não é um pacote npm autônomo.
+#### Exemplo de Configuração para Claude Desktop / Cursor / Windsurf:
+```json
+{
+  "mcpServers": {
+    "agent-dreams": {
+      "command": "bunx",
+      "args": ["agent-dreams"]
+    }
+  }
+}
+```
 
 #### Tools MCP expostas
 
@@ -313,25 +324,25 @@ no macOS ou `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
 ```json
 {
   "mcpServers": {
-    "dreams": {
-      "command": "bun",
-      "args": ["/caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js"]
+    "agent-dreams": {
+      "command": "npx",
+      "args": ["-y", "agent-dreams"]
     }
   }
 }
 ```
 
-> Substitua `/caminho/absoluto/para/opencode-plugin-dreams` pelo caminho real do
-> seu checkout (ex.: `~/.config/opencode/plugins/opencode-plugin-dreams`).
+> No checkout local de desenvolvimento, substitua por:
+> `"command": "bun", "args": ["/caminho/absoluto/para/opencode-plugin-dreams/bin/agent-dreams.js"]`
 
 **Cursor** (`~/.cursor/mcp.json` ou `.cursor/mcp.json` na raiz do projeto):
 
 ```json
 {
   "mcpServers": {
-    "dreams": {
-      "command": "bun",
-      "args": ["/caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js"],
+    "agent-dreams": {
+      "command": "npx",
+      "args": ["-y", "agent-dreams"],
       "env": {
         "DREAMS_DIR": "/home/SEU_USUARIO/.config/opencode/dreams"
       }
@@ -345,20 +356,17 @@ no macOS ou `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
 ```json
 {
   "mcpServers": {
-    "dreams": {
-      "command": "bun",
-      "args": ["/caminho/absoluto/para/opencode-plugin-dreams/bin/dreams-mcp.js"]
+    "agent-dreams": {
+      "command": "npx",
+      "args": ["-y", "agent-dreams"]
     }
   }
 }
 ```
 
-> 💡 **Após publicar o pacote no npm**, os snippets podem usar
-> `"command": "bunx", "args": ["--bun", "opencode-plugin-dreams"]`
-> (ou `"command": "npx", "args": ["-y", "opencode-plugin-dreams"]`). O Bun
-> precisa estar no `PATH` por causa do shebang `#!/usr/bin/env bun`.
-> **Antes da publicação, use o caminho absoluto local** — comandos com o nome
-> `dreams-mcp` não funcionam como pacote npm.
+> 💡 **Após publicar o pacote `agent-dreams` no npm**, os clientes MCP podem usar
+> `"command": "npx", "args": ["-y", "agent-dreams"]` (ou `"command": "bunx", "args": ["agent-dreams"]`).
+> O comando expõe nativamente as tools `dream_learn` e `dream_recall` sobre stdio.
 
 ---
 

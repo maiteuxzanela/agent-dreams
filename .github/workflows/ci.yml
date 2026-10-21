@@ -1,0 +1,107 @@
+name: CI
+
+# TICKET-DREAMS-05 — esteira de integração contínua hermética.
+#
+# Contrato de hermeticidade:
+#   * runtime do Bun TRAVADO em versão exata (nunca `latest`) — o CI precisa
+#     reproduzir bit-a-bit o ambiente de homologação e as definições de tipo
+#     (`bun-types` / `@types/bun` ^1.4.2);
+#   * dependências instaladas com lockfile congelado (`--frozen-lockfile`);
+#   * suíte determinística em modo OFFLINE (`DREAMS_OFFLINE=1`) — nenhuma
+#     tentativa de chamada a provedor de IA externo durante o pipeline;
+#   * validação do artefato publicado (`npm pack --dry-run`) com guarda de
+#     integridade do conteúdo do tarball.
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+# Fonte única da verdade da versão do Bun.
+# ATENÇÃO: qualquer bump aqui exige bump em lockstep das devDependencies
+# `bun-types` e `@types/bun` do package.json (e vice-versa).
+env:
+  BUN_VERSION: "1.4.2"
+
+# Execuções concorrentes do mesmo ref são canceladas: evita jobs órfãos
+# consumindo cota sem agregar sinal ao resultado da branch.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Typecheck + Testes Offline + Empacotamento
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun (versão travada)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Cache do diretório de downloads do Bun
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+
+      - name: Setup Node (runtime da guarda de integridade do tarball)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies (lockfile congelado)
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Testes determinísticos (modo offline)
+        run: DREAMS_OFFLINE=1 bun test
+        env:
+          DREAMS_OFFLINE: "1"
+
+      - name: Validação de empacotamento (npm pack --dry-run)
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > pack-manifest.json
+          node -e '
+            const fs = require("node:fs");
+            const manifest = JSON.parse(fs.readFileSync("pack-manifest.json", "utf8"));
+            const files = manifest[0].files.map((f) => f.path);
+            // Guarda de integridade do conteúdo publicado: testes, fixtures,
+            // workflows de CI e artefatos de runtime local nunca podem vazar
+            // para o tarball do registry.
+            const forbidden = files.filter((p) =>
+              p.startsWith("tests/") ||
+              p.startsWith(".github/") ||
+              p.startsWith(".test-scratch/") ||
+              p.endsWith(".log") ||
+              p.endsWith(".db") ||
+              p.endsWith(".db-wal") ||
+              p.endsWith(".db-shm")
+            );
+            if (forbidden.length > 0) {
+              console.error("::error::Artefatos indevidos no pacote publicado:");
+              for (const f of forbidden) console.error("  - " + f);
+              process.exit(1);
+            }
+            if (files.length === 0) {
+              console.error("::error::O tarball saiu vazio — nada seria publicado.");
+              process.exit(1);
+            }
+            console.log("OK: " + files.length + " arquivos no pacote, sem artefatos de teste/CI.");
+          '

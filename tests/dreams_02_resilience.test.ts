@@ -651,19 +651,17 @@ interface WrapperCodes {
 
 /**
  * Prepara um HOME isolado com seams REAIS na frente do PATH: um `bun` que
- * devolve os exit codes pedidos, um `ping` que sinaliza rede online e um
- * `notify-send` que registra a chamada. O `cli.ts` é um placeholder que apenas
- * satisfaz o guard `[ -f "$CLI_PATH" ]` do wrapper (o `bun` é o seam).
+ * devolve os exit codes pedidos, um `curl` que sinaliza rede online e um
+ * `notify-send` que registra a chamada. O `curl` substitui o antigo seam de
+ * `ping` (TICKET-DREAMS-03): o healthcheck de rede do wrapper passou a ser
+ * HTTP, sem dependência de ICMP. O CLI, por sua vez, é resolvido
+ * dinamicamente pelo próprio wrapper a partir da localização do script.
  */
 function setupWrapper(name: string, codes: WrapperCodes): { home: string; notifyLog: string } {
   const home = makeDir(`wrap_${name}`);
   const fakeBin = path.join(home, ".opencode", "bin");
   fs.mkdirSync(fakeBin, { recursive: true });
   const notifyLog = path.join(home, "notify.log");
-
-  const cliDir = path.join(home, ".config", "opencode", "plugins", "opencode-plugin-dreams", "src");
-  fs.mkdirSync(cliDir, { recursive: true });
-  fs.writeFileSync(path.join(cliDir, "cli.ts"), "// placeholder de guard\n");
 
   fs.writeFileSync(
     path.join(fakeBin, "bun"),
@@ -682,7 +680,8 @@ function setupWrapper(name: string, codes: WrapperCodes): { home: string; notify
     ].join("\n"),
     { mode: 0o755 }
   );
-  fs.writeFileSync(path.join(fakeBin, "ping"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+  // Healthcheck de rede do wrapper: HTTP (curl), sem ICMP (TICKET-DREAMS-03).
+  fs.writeFileSync(path.join(fakeBin, "curl"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
     path.join(fakeBin, "notify-send"),
     `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${notifyLog}"\nexit 0\n`,
@@ -712,7 +711,7 @@ describe("TICKET-DREAMS-02C — wrapper bash (agregação de exit + alerta)", ()
     const { home, notifyLog } = setupWrapper("defer", { light: 0, rem: 75, deep: 0 });
     expect(runWrapper(home, notifyLog)).toBe(EXIT_TEMPFAIL);
     const calls = fs.readFileSync(notifyLog, "utf8");
-    expect(calls).toContain("OpenCode Dreams");
+    expect(calls).toContain("Agent Dreams");
     expect(calls.toLowerCase()).toContain("adiad");
   });
 

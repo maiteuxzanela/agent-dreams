@@ -3,6 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/agent-dreams.svg?color=cb3837&style=flat-square)](https://www.npmjs.com/package/agent-dreams)
 [![npm downloads](https://img.shields.io/npm/dm/agent-dreams.svg?style=flat-square)](https://www.npmjs.com/package/agent-dreams)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/maiteuxzanela/agent-dreams/actions/workflows/ci.yml/badge.svg)](https://github.com/maiteuxzanela/agent-dreams/actions/workflows/ci.yml)
 
 Biblioteca e servidor oficial de **memória contínua, consolidação cognitiva e arquitetura de sono** para o ecossistema de agentes de IA ([OpenCode](https://opencode.ai), Claude Desktop, Cursor, etc.).
 
@@ -12,7 +13,7 @@ O **Agent Dreams** resolve o problema clássico de perda de contexto e amnésia 
 
 ## 🧠 Como Funciona a Arquitetura Tri-Fásica
 
-Diferente de sistemas rudimentares que apenas salvam logs de telemetria ("sessão finalizada", "sessão compactada"), o Chamber Dream executa um ciclo cognitivo estruturado em três fases de sono mais a vigília ativa:
+Diferente de sistemas rudimentares que apenas salvam logs de telemetria ("sessão finalizada", "sessão compactada"), o Agent Dreams executa um ciclo cognitivo estruturado em três fases de sono mais a vigília ativa:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -146,21 +147,43 @@ LLM externa.
 ## 📥 Como Instalar e Configurar
 
 ### 1. Pré-requisitos
-* [Bun](https://bun.sh) (v1.1 ou superior instalado)
-* [OpenCode CLI](https://opencode.ai) (v1.18.x)
+* [Bun](https://bun.sh) **≥ 1.1.0** — runtime canônico do pacote (declarado em `engines.bun`).
+* [OpenCode CLI](https://opencode.ai) (v1.18.x) — necessário apenas para o *entrypoint* de plugin.
 
-### 2. Clonando o Repositório
+> ⚠️ **Node.js puro não é suportado.** O pacote consome `bun:sqlite` e é distribuído
+> com as fontes TypeScript (`src/`) executadas nativamente pelo Bun. Executá-lo via
+> `npx`/`node` falha com `SyntaxError` ou módulo não encontrado. Todos os comandos
+> documentados abaixo usam `bun`/`bunx`.
+
+### 2. Instalação como pacote publicado (servidor MCP)
+
+O pacote está publicado no registry npm e expõe o executável `agent-dreams`
+(transport **stdio**):
+
+```bash
+# Executa o servidor MCP universal a partir do registry:
+bunx agent-dreams
+```
+
+Para configurar clientes MCP (Claude Desktop, Cursor, Windsurf) veja a seção
+[Dual-Entrypoint](#-dual-entrypoint-plugin-opencode--mcp-server-universal).
+
+### 3. Clonando o Repositório (plugin nativo OpenCode)
+
 Clone o repositório diretamente na pasta de plugins do seu usuário OpenCode:
 
 ```bash
 mkdir -p ~/.config/opencode/plugins
 cd ~/.config/opencode/plugins
-git clone https://github.com/maiteuxzanela/agent-dreams.git opencode-plugin-dreams
-cd opencode-plugin-dreams
-bun install
+git clone https://github.com/maiteuxzanela/agent-dreams.git agent-dreams
+cd agent-dreams
+bun install --frozen-lockfile
 ```
 
-### 3. O que precisa ser Editado / Configurado
+> O nome do diretório de clonagem é livre, mas **deve** coincidir com o caminho
+> declarado em `~/.config/opencode/opencode.json` (ver item **C** abaixo).
+
+### 4. O que precisa ser Editado / Configurado
 
 #### A. Override de Modelos e Variáveis de Ambiente (Opcional)
 
@@ -230,7 +253,7 @@ Adicione o plugin ao seu `~/.config/opencode/opencode.json` (ou `opencode.jsonc`
 ```json
 {
   "plugins": [
-    "~/.config/opencode/plugins/opencode-plugin-dreams"
+    "~/.config/opencode/plugins/agent-dreams"
   ]
 }
 ```
@@ -256,7 +279,7 @@ compartilhando o mesmo banco SQLite e as mesmas regras de memória:
 | Entrypoint | Quando usar | Como iniciar |
 |---|---|---|
 | **Plugin nativo OpenCode** | Sessões do OpenCode (tools `dream_learn`/`dream_recall` no runtime) | Registro no `opencode.json` (ver acima) |
-| **MCP Server universal** | Claude Desktop, Cursor, Windsurf e qualquer cliente MCP | `bunx agent-dreams` ou `npx agent-dreams` (transporte **stdio**) |
+| **MCP Server universal** | Claude Desktop, Cursor, Windsurf e qualquer cliente MCP | `bunx agent-dreams` (transporte **stdio**) |
 
 ### 1. Plugin nativo OpenCode
 
@@ -265,7 +288,7 @@ Basta registrar o pacote no `~/.config/opencode/opencode.json`
 ```json
 {
   "plugins": [
-    "~/.config/opencode/plugins/opencode-plugin-dreams"
+    "~/.config/opencode/plugins/agent-dreams"
   ]
 }
 ```
@@ -273,13 +296,11 @@ As ferramentas ficam disponíveis automaticamente para todos os agentes.
 
 ### 2. MCP Server universal (`agent-dreams`)
 
-O pacote expõe o binário executável **`agent-dreams`** (com alias legado `dreams-mcp` mantido para compatibilidade). O servidor fala **JSON-RPC newline-delimited sobre stdio**: `stdout` é exclusivo do protocolo e os logs vão para `stderr`.
+O pacote expõe o binário executável **`agent-dreams`** (com alias legado `dreams-mcp` mantido para compatibilidade — ambos mapeiam para o mesmo arquivo `./bin/agent-dreams.js`). O servidor fala **JSON-RPC newline-delimited sobre stdio**: `stdout` é exclusivo do protocolo e os logs vão para `stderr`.
 
 ```bash
-# Execução universal (via NPM registry):
+# Execução universal (via registry NPM, runtime Bun):
 bunx agent-dreams
-# ou via npx:
-npx agent-dreams
 
 # Checkout local (desenvolvimento):
 ./bin/agent-dreams.js
@@ -329,15 +350,15 @@ no macOS ou `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
 {
   "mcpServers": {
     "agent-dreams": {
-      "command": "npx",
-      "args": ["-y", "agent-dreams"]
+      "command": "bunx",
+      "args": ["agent-dreams"]
     }
   }
 }
 ```
 
 > No checkout local de desenvolvimento, substitua por:
-> `"command": "bun", "args": ["/caminho/absoluto/para/opencode-plugin-dreams/bin/agent-dreams.js"]`
+> `"command": "bun", "args": ["/caminho/absoluto/para/agent-dreams/bin/agent-dreams.js"]`
 
 **Cursor** (`~/.cursor/mcp.json` ou `.cursor/mcp.json` na raiz do projeto):
 
@@ -345,8 +366,8 @@ no macOS ou `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
 {
   "mcpServers": {
     "agent-dreams": {
-      "command": "npx",
-      "args": ["-y", "agent-dreams"],
+      "command": "bunx",
+      "args": ["agent-dreams"],
       "env": {
         "DREAMS_DIR": "/home/SEU_USUARIO/.config/opencode/dreams"
       }
@@ -361,68 +382,93 @@ no macOS ou `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
 {
   "mcpServers": {
     "agent-dreams": {
-      "command": "npx",
-      "args": ["-y", "agent-dreams"]
+      "command": "bunx",
+      "args": ["agent-dreams"]
     }
   }
 }
 ```
 
-> 💡 **Após publicar o pacote `agent-dreams` no npm**, os clientes MCP podem usar
-> `"command": "npx", "args": ["-y", "agent-dreams"]` (ou `"command": "bunx", "args": ["agent-dreams"]`).
-> O comando expõe nativamente as tools `dream_learn` e `dream_recall` sobre stdio.
+> 💡 O comando `bunx agent-dreams` expõe nativamente as tools `dream_learn` e
+> `dream_recall` sobre stdio, usando o runtime Bun (exigido pelo pacote). O alias
+> legado `dreams-mcp` permanece disponível para configurações preexistentes.
 
 ---
 
 ## ⏰ Automatizando a Consolidação Noturna (Systemd)
 
-Para que o ciclo de sono execute automaticamente todas as noites (ex.: às 03:00 da madrugada), crie os serviços de usuário do Systemd:
+Para que o ciclo de sono execute automaticamente todas as noites (ex.: às 03:30 da
+madrugada, conforme a *unit* versionada), o repositório versiona as *units* de usuário
+do Systemd:
 
-### 1. Criar o serviço: `~/.config/systemd/user/opencode-dreams.service`
-```ini
-[Unit]
-Description=OpenCode Dreams Daily Memory Consolidation Service
-After=network-online.target
-Wants=network-online.target
+| Arquivo | Função |
+|---|---|
+| `systemd/agent-dreams.service` | Serviço `oneshot` que executa o ciclo completo (Light → REM → Deep). O caminho de instalação é o placeholder `__AGENT_DREAMS_DIR__`, substituído na instalação. |
+| `systemd/agent-dreams.timer` | Agendamento diário (`OnCalendar=*-*-* 03:30:00`), com `Persistent=true` para recuperar disparos perdidos. |
+| `bin/enable-systemd.sh` | Instala as *units* em `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`, substituindo o placeholder pelo diretório real de instalação, e habilita o *timer*. |
 
-[Service]
-Type=oneshot
-Environment="HOME=%h"
-Environment="PATH=%h/.opencode/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin"
-# OPENCODE_MODEL NÃO é lido pelo plugin (ver "Override de Modelos"); a cascata
-# padrão (Gemini 3.8 Flash -> Mimo -> DeepSeek) já é usada sem nenhum env de modelo.
-Environment="DREAMS_MIMO_TIMEOUT_MS=180000"
-Environment="OLLAMA_HOST=127.0.0.1:99999"
-Environment="CUDA_VISIBLE_DEVICES="
-Environment="FORBID_LOCAL_INFERENCE=true"
-WorkingDirectory=%h/.config/opencode/plugins/opencode-plugin-dreams
-ExecStart=%h/.config/opencode/plugins/opencode-plugin-dreams/bin/dreams-consolidate.sh
-StandardOutput=journal
-StandardError=journal
+### 1. Instalar e ativar (caminho recomendado)
 
-[Install]
-WantedBy=default.target
-```
-
-### 2. Criar o temporizador: `~/.config/systemd/user/opencode-dreams.timer`
-```ini
-[Unit]
-Description=OpenCode Dreams Daily Memory Consolidation Timer
-
-[Timer]
-OnCalendar=*-*-* 03:00:00
-Persistent=true
-RandomizedDelaySec=60
-
-[Install]
-WantedBy=timers.target
-```
-
-### 3. Ativar o temporizador:
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable --now opencode-dreams.timer
+# Instala e ativa o timer diário (03:30) do agent-dreams
+bin/enable-systemd.sh
+# units geradas em ${XDG_CONFIG_HOME:-~/.config}/systemd/user/agent-dreams.{service,timer}
 ```
+
+O script resolve o diretório do plugin dinamicamente, copia as *units* versionadas para
+`${XDG_CONFIG_HOME:-~/.config}/systemd/user/`, substitui o placeholder
+`__AGENT_DREAMS_DIR__` pelo diretório real de instalação (nenhum caminho absoluto da
+máquina de desenvolvimento fica fixado na *unit*), recarrega o *daemon* do usuário,
+habilita o *timer* e lista os próximos disparos.
+
+Variáveis de ambiente suportadas (nenhuma flag ou argumento posicional):
+
+| Variável | Efeito |
+|---|---|
+| `DREAMS_PLUGIN_DIR` | Sobrescreve o diretório do plugin detectado a partir da localização do script. |
+| `XDG_CONFIG_HOME` | Base do *systemd user* (padrão `~/.config`). |
+
+### 2. Instalação manual (sem o script auxiliar)
+
+Copie as *units* e substitua o placeholder pelo diretório onde o pacote está instalado:
+
+```bash
+USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+mkdir -p "$USER_UNIT_DIR"
+
+PLUGIN_DIR="$HOME/.config/opencode/plugins/agent-dreams"   # ajuste ao seu caminho
+sed "s|__AGENT_DREAMS_DIR__|$PLUGIN_DIR|g" \
+  systemd/agent-dreams.service > "$USER_UNIT_DIR/agent-dreams.service"
+cp systemd/agent-dreams.timer "$USER_UNIT_DIR/agent-dreams.timer"
+
+systemctl --user daemon-reload
+systemctl --user enable --now agent-dreams.timer
+systemctl --user list-timers agent-dreams.timer
+```
+
+> As *units* usam nomenclatura canônica `agent-dreams` (o prefixo legado
+> `opencode-dreams` foi removido). Verifique o nome efetivo com
+> `systemctl --user list-timers` após a instalação.
+
+### 3. Comportamento do ciclo agendado
+
+* O *wrapper* `bin/dreams-consolidate.sh` adquire um *lock* exclusivo (`flock -n`) em
+  `${XDG_RUNTIME_DIR:-/tmp}/agent-dreams.lock`: uma execução manual concorrente ao
+  *timer* é encerrada sem alterar estado.
+* A detecção de conectividade usa uma sonda **HTTP** de curta duração (`curl` → `wget`,
+  *timeout* de 3 s, *fallback* `1.1.1.1` → `8.8.8.8`) — **não** depende de ICMP
+  (`ping`), que é bloqueado em muitas redes corporativas. Sem cliente HTTP no host, o
+  wrapper assume o estado online (*fail-open*) e deixa o REM Sleep decidir.
+* O orçamento de tolerância a boot é configurável: `DREAMS_NET_MAX_ATTEMPTS`
+  (padrão `20`) e `DREAMS_NET_RETRY_DELAY` (padrão `3` segundos).
+* Sem rede, as fases locais (*Light* e *Deep Sleep*) executam normalmente e apenas a
+  síntese REM roda em modo offline (`DREAMS_OFFLINE=1`), preservando o *handoff* para
+  o próximo ciclo.
+* O *wrapper* propaga **códigos de saída semânticos**: `0` (íntegro), `1` (falha fatal)
+  e `75`/`EX_TEMPFAIL` (síntese REM adiada por indisponibilidade de IA, cota ou rede —
+  nova tentativa no ciclo seguinte).
+* O log do ciclo fica em `${XDG_STATE_HOME:-~/.local/state}/agent-dreams.log`, com
+  rotação automática em 5 MiB.
 
 ---
 
@@ -485,10 +531,40 @@ bun run test
 
 # Executa o typecheck rigoroso do TypeScript
 bun run typecheck
+
+# Valida o artefato que será publicado no registry (sem gerar tarball)
+npm pack --dry-run
 ```
+
+### Esteira de CI (`.github/workflows/ci.yml`)
+
+Toda *pull request* e todo *push* nas branches `main`/`master` disparam a mesma
+esteira hermética usada no release:
+
+| Etapa | Comando | Garantia |
+|---|---|---|
+| Instalação | `bun install --frozen-lockfile` | Dependências idênticas ao `bun.lock`, sem resolução implícita de versões. |
+| Tipos | `bun run typecheck` | `tsc --noEmit` em modo `strict`. |
+| Testes | `DREAMS_OFFLINE=1 bun test` | Suíte determinística, **sem** qualquer chamada a provedor de IA externo. |
+| Empacotamento | `npm pack --dry-run` | Valida o tarball e **aborta** se vazar artefatos de teste/CI ou se sair vazio. |
+
+O runtime do Bun é **travado** em versão exata (`1.4.2`), alinhada ao ambiente de
+homologação e às definições de tipo `bun-types`/`@types/bun` — builds reprodutíveis,
+sem o risco de uma atualização *upstream* do Bun quebrar o pipeline.
+
+A mesma esteira — incluindo a **guarda de integridade do tarball** — roda no
+*caminho de publicação* (`.github/workflows/publish.yml`, disparado pela publicação de
+uma release). O gate de release não depende do `ci.yml`: *pushes* de *tag* não casam
+com `on.push.branches`, de modo que a checagem está no próprio workflow que publica.
+
+A publicação no registry (`.github/workflows/publish.yml`) usa
+`npm publish --access public --provenance`, gerando o **atestado de proveniência**
+verificável do build (requer a permissão `id-token: write` do workflow).
 
 ---
 
 ## 📄 Licença
 
-Distribuído sob a licença MIT. Criado por [Maiteux Zanela](https://github.com/maiteuxzanela).
+Distribuído sob a licença MIT (arquivo `LICENSE` na raiz do repositório). Criado por [Maiteux Zanela](https://github.com/maiteuxzanela).
+
+O histórico de versões está em [`CHANGELOG.md`](./CHANGELOG.md).

@@ -1,6 +1,6 @@
 {
   "name": "agent-dreams",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Cognitive sleep cycle & universal persistent memory for AI agents (OpenCode plugin + MCP server)",
   "type": "module",
   "main": "src/index.ts",
@@ -12,6 +12,17 @@
   "bin": {
     "agent-dreams": "./bin/agent-dreams.js",
     "dreams-mcp": "./bin/agent-dreams.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "systemd",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
   },
   "scripts": {
     "test": "DREAMS_OFFLINE=1 bun test",

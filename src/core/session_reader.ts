@@ -23,6 +23,14 @@
  * indisponível retornam `[]` (fail-soft; o erro é apenas repassado ao
  * callback opcional `onError`, nunca propagado).
  *
+ * TICKET-DREAMS-04 — CHECAGEM PREVENTIVA DE SCHEMA: antes da query quente,
+ * o schema do OpenCode é inspecionado via `PRAGMA table_info` (tabelas
+ * `message`, `part` e `session`). Uma divergência crítica (tabela essencial
+ * ausente ou coluna crítica faltando) vira um erro SEMÂNTICO
+ * (`SessionSchemaError`) que orienta a usuária a atualizar o OpenCode —
+ * no lugar do crash genérico do SQLite. Divergências advisory (a tabela
+ * opcional `session`) são reportadas, mas não abortam a leitura.
+ *
  * TICKET-DREAMS-08 (Frente 8A) — INGESTÃO INTEGRAL EM CHUNKS: além do resumo
  * de disparo único (`summarizeDialogues`, mantido por compatibilidade), este
  * módulo expõe `chunkDialogues` / `chunkDialogueText` / `buildDialogueSummary`.
@@ -101,7 +109,9 @@ export interface SessionReaderOptions {
    * Títulos de sessão a excluir da leitura (comparação exata contra
    * `session.data.title`). Padrão: `["Dreams Synthesis"]`. Passe `[]` para
    * desligar a exclusão. Quando a tabela `session` não existe (schema
-   * divergente), a exclusão degrada silenciosamente para vazio.
+   * divergente), a exclusão degrada para vazio — e a divergência é REPORTADA
+   * via `onError` (sem abortar a leitura), porque a defesa anti-recursão
+   * fica inativa.
    */
   excludeSessionTitles?: readonly string[];
   /**
@@ -111,9 +121,237 @@ export interface SessionReaderOptions {
   onError?: (error: unknown) => void;
 }
 
+/** Uma linha crua da tabela `message` lida do banco de sessões. */
+interface MessageRow {
+  id: string;
+  session_id: string;
+  time_created: number;
+  role_raw: unknown;
+}
+
+/**
+ * TICKET-DREAMS-04 — SQLs ESTÁTICOS da leitura (nada é concatenado neles).
+ *
+ * A lista de sessões internas a excluir e a lista de IDs de mensagem entram
+ * como PARÂMETRO JSON, expandido por `json_each` — em vez de placeholders
+ * montados por concatenação. `NOT IN (SELECT ...)` sobre um conjunto vazio é
+ * TRUE, então a ausência de exclusões não altera o resultado.
+ */
+
+/** Variante COM teto: as N mensagens MAIS RECENTES (invertidas em JS). */
+const SQL_MESSAGES_LIMITED = `
+      SELECT m.id, m.session_id, m.time_created,
+             json_extract(m.data, '$.role') AS role_raw
+        FROM message m
+       WHERE m.time_created >= ? AND m.time_created <= ?
+         AND m.session_id NOT IN (SELECT value FROM json_each(?))
+       ORDER BY m.time_created DESC, m.id DESC
+       LIMIT ?`;
+
+/** Variante SEM teto: TODAS as mensagens da janela, em ordem cronológica. */
+const SQL_MESSAGES_UNLIMITED = `
+      SELECT m.id, m.session_id, m.time_created,
+             json_extract(m.data, '$.role') AS role_raw
+        FROM message m
+       WHERE m.time_created >= ? AND m.time_created <= ?
+         AND m.session_id NOT IN (SELECT value FROM json_each(?))
+       ORDER BY m.time_created ASC, m.id ASC`;
+
+/** Partes textuais (`text`/`reasoning`) das mensagens informadas. */
+const SQL_PARTS = `
+      SELECT p.message_id,
+             json_extract(p.data, '$.type')  AS ptype,
+             json_extract(p.data, '$.text')  AS ptext,
+             p.time_created AS ptime,
+             p.id           AS pid
+        FROM part p
+       WHERE p.message_id IN (SELECT value FROM json_each(?))
+         AND json_valid(p.data)
+         AND (
+               json_extract(p.data, '$.type') = 'text'
+               OR (? = 1 AND json_extract(p.data, '$.type') = 'reasoning')
+             )
+         AND json_extract(p.data, '$.text') IS NOT NULL
+         AND TRIM(json_extract(p.data, '$.text')) <> ''
+       ORDER BY p.message_id, p.time_created ASC, p.id ASC`;
+
 /** Caminho padrão do banco de sessões do OpenCode. */
 export function defaultSessionDbPath(): string {
   return path.join(os.homedir(), ".local/share/opencode/opencode.db");
+}
+
+// ---------------------------------------------------------------------------
+// TICKET-DREAMS-04 — Checagem preventiva de schema do OpenCode
+// ---------------------------------------------------------------------------
+
+/**
+ * Tabelas do banco de sessões inspecionadas na checagem preventiva.
+ *
+ * `message` e `part` são o CORPO da leitura (sem elas a query quente nem
+ * compila). `session` é usada apenas pela exclusão anti-recursão — sua
+ * ausência é uma degradação suportada (ver `collectExcludedSessionIds`), mas
+ * continua sendo inspecionada para que a divergência seja REPORTADA.
+ */
+export const SESSION_SCHEMA_TABLES = ["message", "part", "session"] as const;
+
+/** Versão em `Set` da lista acima (guard de interpolação do PRAGMA). */
+const SESSION_SCHEMA_TABLE_SET: ReadonlySet<string> = new Set(SESSION_SCHEMA_TABLES);
+
+/** Colunas críticas por tabela (as consumidas pelas queries de leitura). */
+export const SESSION_SCHEMA_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  message: ["id", "session_id", "time_created", "data"],
+  part: ["id", "message_id", "time_created", "data"],
+  session: ["id", "data"],
+};
+
+/**
+ * Tabelas cuja AUSÊNCIA invalida a leitura. `session` NÃO entra: ela é
+ * opcional por contrato (a exclusão anti-recursão degrada para lista vazia).
+ */
+const REQUIRED_SESSION_TABLES: readonly string[] = ["message", "part"];
+
+/**
+ * Severidade de uma divergência de schema.
+ *
+ *  - `critical`: a leitura é IMPOSSÍVEL (falta tabela/coluna essencial).
+ *    O erro semântico aborta a leitura no lugar do crash genérico do SQLite.
+ *  - `advisory`: a leitura continua, mas uma capacidade foi degradada
+ *    (ex.: a exclusão anti-recursão fica inativa). O erro semântico é
+ *    reportado, mas NÃO aborta a leitura.
+ */
+export type SessionSchemaSeverity = "critical" | "advisory";
+
+/** Uma divergência detectada entre o schema esperado e o schema real. */
+export interface SessionSchemaDivergence {
+  /** Tabela inspecionada (`message`, `part` ou `session`). */
+  table: string;
+  /** `critical` aborta a leitura; `advisory` apenas reporta. */
+  severity: SessionSchemaSeverity;
+  /** `true` quando a tabela inteira não existe no banco. */
+  missingTable: boolean;
+  /** Colunas críticas ausentes (vazio quando a tabela inteira falta). */
+  missingColumns: string[];
+}
+
+/**
+ * Erro SEMÂNTICO de divergência de schema — orienta a usuária/ o usuário em
+ * vez de propagar um `SQLiteError: no such column: ...` genérico.
+ */
+export class SessionSchemaError extends Error {
+  /** Divergências detectadas (críticas e/ou advisory). */
+  readonly divergences: SessionSchemaDivergence[];
+  /** Caminho do banco inspecionado. */
+  readonly dbPath: string;
+  /** `true` quando a divergência IMPEDE a leitura (severidade crítica). */
+  readonly fatal: boolean;
+
+  constructor(dbPath: string, divergences: SessionSchemaDivergence[]) {
+    super(buildSessionSchemaMessage(dbPath, divergences));
+    this.name = "SessionSchemaError";
+    this.divergences = divergences;
+    this.dbPath = dbPath;
+    this.fatal = divergences.some((divergence) => divergence.severity === "critical");
+  }
+}
+
+/** Monta a mensagem orientativa do erro semântico de schema. */
+function buildSessionSchemaMessage(
+  dbPath: string,
+  divergences: SessionSchemaDivergence[]
+): string {
+  const details = divergences
+    .map((divergence) => {
+      if (divergence.missingTable) return `tabela '${divergence.table}' ausente`;
+      return `tabela '${divergence.table}' sem a(s) coluna(s) ${divergence.missingColumns.join(", ")}`;
+    })
+    .join("; ");
+
+  const fatal = divergences.some((divergence) => divergence.severity === "critical");
+
+  if (!fatal) {
+    return (
+      `Schema do banco de sessões do OpenCode divergente (${dbPath}): ${details}. ` +
+      `A leitura do diálogo continua, mas a exclusão anti-recursão das sessões ` +
+      `internas do Dreams fica inativa (schema divergente do esperado).`
+    );
+  }
+
+  return (
+    `Schema do banco de sessões do OpenCode incompatível (${dbPath}): ${details}. ` +
+    `O Dreams espera as tabelas 'message' (id, session_id, time_created, data), ` +
+    `'part' (id, message_id, time_created, data) e 'session' (id, data). ` +
+    `Atualize o OpenCode para a versão que o Dreams suporta ou aponte o caminho ` +
+    `correto do banco de sessões.`
+  );
+}
+
+/** Colunas existentes de uma tabela (`PRAGMA table_info`). */
+function tableColumns(db: Database, table: string): Set<string> {
+  // O identificador vem SEMPRE da lista fechada `SESSION_SCHEMA_TABLES`
+  // (nunca de entrada do usuário) — o guard abaixo blinda a interpolação
+  // do PRAGMA contra qualquer nome de tabela forasteiro.
+  if (!SESSION_SCHEMA_TABLE_SET.has(table)) return new Set();
+  const rows = db.query<{ name: string }, []>(`PRAGMA table_info("${table}")`).all();
+  return new Set(rows.map((row) => row.name));
+}
+
+/**
+ * Inspeciona o schema do banco de sessões via `PRAGMA table_info` e devolve
+ * as divergências encontradas (tabela ausente ou coluna crítica ausente).
+ *
+ * Leve e somente-leitura: 3 PRAGMAs — nenhuma query sobre as tabelas.
+ */
+export function inspectSessionSchema(db: Database): SessionSchemaDivergence[] {
+  const divergences: SessionSchemaDivergence[] = [];
+
+  for (const table of SESSION_SCHEMA_TABLES) {
+    const columns = tableColumns(db, table);
+    const required = REQUIRED_SESSION_TABLES.includes(table);
+    const severity: SessionSchemaSeverity = required ? "critical" : "advisory";
+
+    if (columns.size === 0) {
+      // `PRAGMA table_info` de uma tabela inexistente devolve zero linhas.
+      divergences.push({
+        table,
+        severity,
+        missingTable: true,
+        missingColumns: [],
+      });
+      continue;
+    }
+
+    const missingColumns = SESSION_SCHEMA_COLUMNS[table].filter(
+      (column) => !columns.has(column)
+    );
+    if (missingColumns.length > 0) {
+      divergences.push({
+        table,
+        severity,
+        missingTable: false,
+        missingColumns: [...missingColumns],
+      });
+    }
+  }
+
+  return divergences;
+}
+
+/**
+ * Validação PREVENTIVA do schema do OpenCode.
+ *
+ * Divergências `critical` abortam a leitura com um erro semântico (o
+ * usuário é orientado a atualizar o OpenCode); divergências `advisory` são
+ * apenas reportadas — a leitura continua, com a capacidade degradada.
+ *
+ * @throws {SessionSchemaError} quando há divergência crítica.
+ */
+export function assertSessionSchema(db: Database, dbPath: string): SessionSchemaDivergence[] {
+  const divergences = inspectSessionSchema(db);
+  const critical = divergences.filter((divergence) => divergence.severity === "critical");
+  if (critical.length > 0) {
+    throw new SessionSchemaError(dbPath, critical);
+  }
+  return divergences;
 }
 
 /** Normaliza o papel vindo do JSON de `message.data`. */
@@ -129,7 +367,8 @@ function normalizeRole(raw: unknown): DialogRole {
  * Dreams uma única vez, fora da query quente, consultando a tabela `session`.
  * É deliberadamente fail-soft: se a tabela não existir (schemas antigos,
  * fixtures de teste) ou `session.data` não for JSON válido, retorna `[]` em vez
- * de derrubar a leitura. Nunca interpola valores no SQL — usa placeholders.
+ * de derrubar a leitura. Nunca interpola valores no SQL — a lista de títulos
+ * entra como parâmetro JSON e é expandida por `json_each`.
  */
 function collectExcludedSessionIds(db: Database, titles: readonly string[]): string[] {
   if (titles.length === 0) return [];
@@ -141,21 +380,21 @@ function collectExcludedSessionIds(db: Database, titles: readonly string[]): str
       .get();
     if (!tableExists) return [];
 
-    const placeholders = titles.map(() => "?").join(",");
     const rows = db
-      .query<{ id: string | null }, any[]>(
+      .query<{ id: string | null }, [string]>(
         `SELECT s.id AS id
            FROM session s
           WHERE json_valid(s.data)
-            AND json_extract(s.data, '$.title') IN (${placeholders})`
+            AND json_extract(s.data, '$.title') IN (SELECT value FROM json_each(?))`
       )
-      .all(...titles);
+      .all(JSON.stringify(titles));
 
     return rows
       .map((row) => row.id)
       .filter((id): id is string => typeof id === "string" && id.length > 0);
-  } catch {
+  } catch (error) {
     // Tabela ausente, schema divergente ou JSON malformado → sem exclusões.
+    void error;
     return [];
   }
 }
@@ -205,16 +444,25 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
   try {
     db = new Database(dbPath, { readonly: true });
 
+    // TICKET-DREAMS-04: CHECAGEM PREVENTIVA de schema, ANTES da query quente.
+    // Divergência crítica → erro semântico que orienta o usuário (o crash
+    // genérico do SQLite — "no such column: ..." — nunca chega a acontecer).
+    // Divergência advisory → apenas reportada; a leitura continua, com a
+    // capacidade degradada (ex.: exclusão anti-recursão inativa).
+    const divergences = assertSessionSchema(db, dbPath);
+    const advisories = divergences.filter(
+      (divergence) => divergence.severity === "advisory"
+    );
+    if (advisories.length > 0) {
+      options.onError?.(new SessionSchemaError(dbPath, advisories));
+    }
+
     // 0) Defesa anti-recursão (camada 1 — SQL): resolve os IDs das sessões
     //    internas do Dreams ("Dreams Synthesis") ANTES da query quente, para
     //    que o LIMIT já incida sobre o conjunto filtrado. Fail-soft: tabela
     //    ausente → lista vazia, sem afetar a leitura normal.
     const excludedSessionIds = collectExcludedSessionIds(db, excludeSessionTitles);
     const excludedSessionIdSet = new Set(excludedSessionIds);
-    const exclusionClause =
-      excludedSessionIds.length > 0
-        ? `AND m.session_id NOT IN (${excludedSessionIds.map(() => "?").join(",")})`
-        : "";
 
     // 1) Mensagens da janela.
     //    - Sem limite (omitido/null/0/Infinity): leitura IRRESTRITA, ordenada
@@ -222,31 +470,19 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
     //    - Com limite positivo finito (compatibilidade): busca em ordem
     //      DECRESCENTE + LIMIT para reter as mais RECENTES quando a janela
     //      excede o teto, depois inverte para a ordem cronológica de leitura.
-    const orderClause = hasFiniteLimit
-      ? "ORDER BY m.time_created DESC, m.id DESC\n          LIMIT ?"
-      : "ORDER BY m.time_created ASC, m.id ASC";
-    const queryParams: (string | number)[] = hasFiniteLimit
-      ? [since, until, ...excludedSessionIds, limit as number]
-      : [since, until, ...excludedSessionIds];
-
-    const messages = db
-      .query<
-        {
-          id: string;
-          session_id: string;
-          time_created: number;
-          role_raw: unknown;
-        },
-        (string | number)[]
-      >(
-        `SELECT m.id, m.session_id, m.time_created,
-                json_extract(m.data, '$.role') AS role_raw
-           FROM message m
-          WHERE m.time_created >= ? AND m.time_created <= ?
-                ${exclusionClause}
-          ${orderClause}`
-      )
-      .all(...queryParams);
+    //
+    //    As DUAS variantes de SQL são ESTÁTICAS (nada é concatenado na
+    //    string): a lista de sessões excluídas entra como parâmetro JSON e é
+    //    expandida por `json_each` — `NOT IN (subquery vazia)` é TRUE, ou
+    //    seja, a ausência de exclusões não altera o resultado.
+    const excludedIdsJson = JSON.stringify(excludedSessionIds);
+    const messages = hasFiniteLimit
+      ? db
+          .query<MessageRow, (string | number)[]>(SQL_MESSAGES_LIMITED)
+          .all(since, until, excludedIdsJson, limit as number)
+      : db
+          .query<MessageRow, (string | number)[]>(SQL_MESSAGES_UNLIMITED)
+          .all(since, until, excludedIdsJson);
     if (hasFiniteLimit) messages.reverse();
 
     if (messages.length === 0) return [];
@@ -255,9 +491,9 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
     //    `json_valid` blinda contra JSON malformado isolado: a linha inválida é
     //    descartada em vez de derrubar a consulta inteira. O filtro de kind vai
     //    por parâmetro posicionado (?) — nada de interpolação de string no SQL.
-    //    Filtra exatamente pelos IDs das mensagens retornadas no primeiro select.
-    const msgIds = messages.map((m) => m.id);
-    const placeholders = msgIds.map(() => "?").join(",");
+    //    Filtra exatamente pelos IDs das mensagens retornados no primeiro select
+    //    (parâmetro JSON expandido por `json_each`).
+    const msgIdsJson = JSON.stringify(messages.map((m) => m.id));
     const rows = db
       .query<
         {
@@ -267,25 +503,9 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
           ptime: number;
           pid: string;
         },
-        any[]
-      >(
-        `SELECT p.message_id,
-                json_extract(p.data, '$.type')  AS ptype,
-                json_extract(p.data, '$.text')  AS ptext,
-                p.time_created AS ptime,
-                p.id           AS pid
-           FROM part p
-          WHERE p.message_id IN (${placeholders})
-            AND json_valid(p.data)
-            AND (
-                  json_extract(p.data, '$.type') = 'text'
-                  OR (? = 1 AND json_extract(p.data, '$.type') = 'reasoning')
-                )
-            AND json_extract(p.data, '$.text') IS NOT NULL
-            AND TRIM(json_extract(p.data, '$.text')) <> ''
-          ORDER BY p.message_id, p.time_created ASC, p.id ASC`
-      )
-      .all(...msgIds, includeReasoning ? 1 : 0);
+        (string | number)[]
+      >(SQL_PARTS)
+      .all(msgIdsJson, includeReasoning ? 1 : 0);
 
     // 3) Agrupa as partes por mensagem E por kind, preservando a ordem
     //    cronológica interna (o raciocínio vem antes da fala do agente).
@@ -348,8 +568,9 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
   } finally {
     try {
       db?.close();
-    } catch {
-      /* já fechado / nunca aberto */
+    } catch (error) {
+      // Banco já fechado / nunca aberto — fechamento idempotente.
+      void error;
     }
   }
 }
@@ -552,10 +773,27 @@ export function chunkDialogues(
 /**
  * Atalho único: lê o diálogo recente e devolve o resumo textual pronto para
  * prompt. Nunca lança exceção (retorna string vazia / aviso em caso de falha).
+ *
+ * Quando o schema do OpenCode é INCOMPATÍVEL (divergência crítica), o resumo
+ * devolve a orientação semântica — é a única string que sai daqui, então é
+ * ela que carrega a instrução de atualização para a usuária.
  */
 export function readRecentDialogueSummary(options: SessionReaderOptions = {}): string {
+  const fatalSchemaErrors: SessionSchemaError[] = [];
   try {
-    return summarizeDialogues(readRecentDialogues(options));
+    const entries = readRecentDialogues({
+      ...options,
+      onError: (error) => {
+        if (error instanceof SessionSchemaError && error.fatal) {
+          fatalSchemaErrors.push(error);
+        }
+        options.onError?.(error);
+      },
+    });
+    if (fatalSchemaErrors.length > 0) {
+      return `(session_reader: ${fatalSchemaErrors[0].message})`;
+    }
+    return summarizeDialogues(entries);
   } catch (error) {
     // Defesa extra: só é alcançável se o próprio summarizer falhar.
     options.onError?.(error);

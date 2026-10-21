@@ -4,6 +4,291 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 
+/**
+ * TICKET-DREAMS-04 — Permissões POSIX canônicas do banco de memórias.
+ *
+ * O diretório do banco (`~/.config/opencode/dreams`) é `0o700` (somente o
+ * dono entra) e os artefatos SQLite (`dreams.db`, `dreams.db-wal`,
+ * `dreams.db-shm`) são `0o600` (somente o dono lê/escreve).
+ *
+ * Sem esse endosso, o SQLite cria os arquivos com o umask do processo
+ * (tipicamente `0o644`) — o que deixaria as memórias do agente legíveis por
+ * QUALQUER usuário da máquina. O `chmod` explícito fecha essa janela.
+ */
+export const DREAMS_DIR_MODE = 0o700;
+export const DREAMS_FILE_MODE = 0o600;
+
+/**
+ * Diretórios de sistema que NUNCA podem ter a permissão apertada: são
+ * compartilhados pelo sistema operacional (e/ou por outros usuários) e um
+ * `chmod 0o700` neles quebraria o ambiente inteiro. O banco do Dreams vive
+ * sempre sob o home do usuário, então o caminho normal nunca colide aqui —
+ * a lista é apenas uma rede de segurança para `dbPath` customizado.
+ */
+const PROTECTED_SYSTEM_DIRECTORIES = new Set([
+  "/",
+  "/bin",
+  "/boot",
+  "/dev",
+  "/etc",
+  "/home",
+  "/lib",
+  "/lib64",
+  "/media",
+  "/mnt",
+  "/opt",
+  "/proc",
+  "/root",
+  "/run",
+  "/sbin",
+  "/srv",
+  "/sys",
+  "/tmp",
+  "/usr",
+  "/var",
+]);
+
+/**
+ * Descarta explicitamente o erro de uma operação best-effort.
+ *
+ * Existe para que NENHUM `catch` do módulo fique VAZIO: o bloco sempre
+ * declara a intenção ("isto é um best-effort deliberado") em vez de engolir a
+ * falha em silêncio. Usada só onde a falha NÃO pode derrubar o plugin
+ * (chmod em filesystem hostil, `ROLLBACK` de uma transação já desfeita).
+ */
+function ignoreError(error: unknown): void {
+  void error;
+}
+
+/**
+ * Garante `0o700` no diretório do banco. Best-effort: sistemas de arquivos
+ * que rejeitam o `chmod` (read-only, owner divergente) não derrubam o
+ * plugin — o banco segue funcionando, apenas sem o endosso do modo.
+ */
+function enforceDirectoryMode(dir: string): void {
+  const resolved = path.resolve(dir);
+  if (PROTECTED_SYSTEM_DIRECTORIES.has(resolved)) return;
+  try {
+    fs.chmodSync(resolved, DREAMS_DIR_MODE);
+  } catch (error) {
+    // best-effort: o diretório pertence a outro owner ou é read-only.
+    ignoreError(error);
+  }
+}
+
+/**
+ * Garante `0o600` num artefato do SQLite (banco, WAL ou SHM) quando ele
+ * existe. Best-effort pela mesma razão de `enforceDirectoryMode`.
+ */
+function enforceFileMode(filePath: string): void {
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.chmodSync(filePath, DREAMS_FILE_MODE);
+    }
+  } catch (error) {
+    // best-effort: artefato em filesystem read-only ou de outro owner.
+    ignoreError(error);
+  }
+}
+
+/**
+ * TICKET-DREAMS-04 — Versão de schema do banco de memórias.
+ *
+ * A versão vive em `PRAGMA user_version` (cabeçalho do arquivo SQLite) e é
+ * lida/escrita de forma DECLARATIVA: o número é o contrato, o código é a
+ * esteira. Cada passo roda dentro de `BEGIN EXCLUSIVE TRANSACTION` e grava a
+ * nova versão como ÚLTIMA instrução da transação — schema e versão avançam
+ * juntos (ou nenhum dos dois), mesmo após um crash no meio de uma migração
+ * (o `ROLLBACK` desfaz DDL e versão juntos).
+ */
+export const SCHEMA_VERSION = 1;
+
+/** Um passo da esteira de migrações. */
+export interface MigrationStep {
+  /** Versão alvo gravada em `PRAGMA user_version` ao final do passo. */
+  readonly version: number;
+  /** Identificador legível do passo (usado nas mensagens de erro). */
+  readonly name: string;
+  /** DDL/DML do passo. DEVE ser idempotente. */
+  readonly apply: (db: Database) => void;
+}
+
+/** Falha na aplicação de um passo de migração (transação desfeita). */
+export class MigrationError extends Error {
+  readonly step: string;
+  readonly version: number;
+  readonly cause: unknown;
+
+  constructor(step: MigrationStep, cause: unknown) {
+    super(
+      `Falha na migração do banco de memórias (passo '${step.name}', versão ${step.version}): ` +
+        `${cause instanceof Error ? cause.message : String(cause)}`
+    );
+    this.name = "MigrationError";
+    this.step = step.name;
+    this.version = step.version;
+    this.cause = cause;
+  }
+}
+
+/** Banco gravado por uma versão mais nova do plugin (schema incompatível). */
+export class SchemaVersionError extends Error {
+  readonly found: number;
+  readonly expected: number;
+
+  constructor(found: number, expected: number) {
+    super(
+      `Banco de memórias gravado por uma versão mais nova do plugin ` +
+        `(PRAGMA user_version=${found} > ${expected}). ` +
+        `Atualize o plugin agent-dreams para poder ler este banco.`
+    );
+    this.name = "SchemaVersionError";
+    this.found = found;
+    this.expected = expected;
+  }
+}
+
+/**
+ * Falha ao PREPARAR o banco de memórias — arquivo/diretório sem permissão de
+ * escrita, banco bloqueado por outro processo, arquivo ilegível.
+ *
+ * Existe para que a falha de infraestrutura saia SEMÂNTICA (com o caminho e a
+ * orientação de ação) em vez de vazar um `SQLiteError` cru
+ * ("attempt to write a readonly database"), que não diz ao usuário O QUE
+ * fazer.
+ */
+export class DatabaseInitError extends Error {
+  readonly dbPath: string;
+  readonly cause: unknown;
+
+  constructor(dbPath: string, cause: unknown) {
+    super(
+      `Não foi possível preparar o banco de memórias (${dbPath}): ` +
+        `${cause instanceof Error ? cause.message : String(cause)}. ` +
+        `Verifique se o arquivo e o diretório permitem escrita ` +
+        `(permissões esperadas: 0o600 no arquivo e 0o700 no diretório) e se ` +
+        `o banco não está bloqueado por outro processo.`
+    );
+    this.name = "DatabaseInitError";
+    this.dbPath = dbPath;
+    this.cause = cause;
+  }
+}
+
+/**
+ * Lê a versão de schema declarada em `PRAGMA user_version`.
+ * Valores ausentes/inválidos são normalizados para 0 (re-migra do zero).
+ */
+export function readSchemaVersion(db: Database): number {
+  const row = db.query<{ user_version: number | null }, []>("PRAGMA user_version").get();
+  const version = row?.user_version;
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 0) return 0;
+  return version;
+}
+
+/**
+ * Cria (se ausente) a tabela base de memórias. Idempotente.
+ */
+function ensureMemoriesTable(db: Database): void {
+  db.exec(`
+      CREATE TABLE IF NOT EXISTS memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        fact TEXT NOT NULL,
+        category TEXT NOT NULL,
+        score REAL DEFAULT 1.0,
+        decay_weight REAL DEFAULT 1.0,
+        recall_count INTEGER DEFAULT 0,
+        confirmations INTEGER DEFAULT 1,
+        last_reinforced TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+}
+
+/**
+ * TICKET-DREAMS-03 (Frente A) — Tokenizer com folding de diacríticos.
+ *
+ * Cria `memories_fts` com `tokenize='unicode61 remove_diacritics 2'`, de modo
+ * que "inferência" e "inferencia" (com/sem acento) tokenizem para a MESMA
+ * representação e casem de forma idêntica tanto no índice quanto na query.
+ *
+ * Migração idempotente: um DB pré-existente criado sem `remove_diacritics`
+ * mantém o DDL antigo no `sqlite_master` (o `CREATE VIRTUAL TABLE IF NOT
+ * EXISTS` nunca o alteraria). Detectamos essa configuração legada e
+ * reconstruímos a tabela virtual + `rebuild` do índice a partir do conteúdo
+ * de `memories` (a FTS é derivada; nenhum dado de memória é perdido).
+ */
+function ensureFtsTable(db: Database): void {
+  const existing = db.query<{ sql: string | null }, []>(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'"
+  ).get();
+
+  const legacyTokenizer =
+    !!existing?.sql && !/remove_diacritics/i.test(existing.sql);
+
+  if (legacyTokenizer) {
+    db.exec("DROP TABLE IF EXISTS memories_fts;");
+  }
+
+  db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+        fact,
+        category,
+        content='memories',
+        content_rowid='id',
+        tokenize='unicode61 remove_diacritics 2'
+      );
+    `);
+
+  if (legacyTokenizer) {
+    // Repopula o índice externo a partir da tabela de conteúdo.
+    db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild');");
+  }
+}
+
+/**
+ * (Re)cria os triggers que mantêm a FTS sincronizada com `memories`.
+ * Idempotente: `IF NOT EXISTS` + recriação é necessária porque o reparo do
+ * tokenizer legado DERRUBA a tabela virtual — e, junto com ela, os triggers
+ * que a referenciam.
+ */
+function ensureFtsTriggers(db: Database): void {
+  db.exec(`
+      CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, fact, category) VALUES (new.id, new.fact, new.category);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, fact, category) VALUES('delete', old.id, old.fact, old.category);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, fact, category) VALUES('delete', old.id, old.fact, old.category);
+        INSERT INTO memories_fts(rowid, fact, category) VALUES (new.id, new.fact, new.category);
+      END;
+    `);
+}
+
+/**
+ * Esteira de migrações — a ordem de `version` É a ordem de execução.
+ *
+ * Para adicionar uma migração: acrescente um passo com `version` nova e DDL
+ * idempotente. NUNCA edite um passo já publicado (bancos em produção já
+ * podem ter aplicado a versão antiga dele).
+ */
+export const MIGRATIONS: readonly MigrationStep[] = [
+  {
+    version: 1,
+    name: "baseline_memories_schema",
+    apply: (db) => {
+      ensureMemoriesTable(db);
+      ensureFtsTable(db);
+      ensureFtsTriggers(db);
+    },
+  },
+];
+
 export interface MemoryRecord {
   id?: number;
   scope: string; // 'collective' or 'agent:<name>'
@@ -101,92 +386,153 @@ export class DreamsDB {
   static readonly MAX_SCORE = 5.0;
 
   private db: Database;
+  /** Caminho absoluto do arquivo SQLite (usado no enforcement POSIX). */
+  private readonly dbPath: string;
 
   constructor(dbPath?: string) {
-    const finalPath = dbPath || path.join(os.homedir(), ".config/opencode/dreams/dreams.db");
+    const finalPath = path.resolve(
+      dbPath || path.join(os.homedir(), ".config/opencode/dreams/dreams.db")
+    );
     const dir = path.dirname(finalPath);
     if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true, mode: DREAMS_DIR_MODE });
     }
+    // TICKET-DREAMS-04: o diretório do banco é `0o700` (só o dono entra).
+    enforceDirectoryMode(dir);
+    this.dbPath = finalPath;
     this.db = new Database(finalPath);
     this.init();
   }
 
-  private init() {
-    this.db.exec("PRAGMA journal_mode = WAL;");
-    this.db.exec("PRAGMA busy_timeout = 5000;");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS memories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        scope TEXT NOT NULL,
-        fact TEXT NOT NULL,
-        category TEXT NOT NULL,
-        score REAL DEFAULT 1.0,
-        decay_weight REAL DEFAULT 1.0,
-        recall_count INTEGER DEFAULT 0,
-        confirmations INTEGER DEFAULT 1,
-        last_reinforced TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      );
-    `);
-
-    this.ensureFtsTable();
-
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-        INSERT INTO memories_fts(rowid, fact, category) VALUES (new.id, new.fact, new.category);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, rowid, fact, category) VALUES('delete', old.id, old.fact, old.category);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, rowid, fact, category) VALUES('delete', old.id, old.fact, old.category);
-        INSERT INTO memories_fts(rowid, fact, category) VALUES (new.id, new.fact, new.category);
-      END;
-    `);
+  /**
+   * Versão de schema aplicada nesta instância (`PRAGMA user_version`), lida
+   * DEPOIS da esteira de migrações: sempre `SCHEMA_VERSION` (ou superior, se
+   * o arquivo foi gravado por outra versão do plugin).
+   */
+  public getSchemaVersion(): number {
+    return readSchemaVersion(this.db);
   }
 
   /**
-   * TICKET-DREAMS-03 (Frente A) — Tokenizer com folding de diacríticos.
+   * Prepara o banco: pragmas, esteira de migrações, reparo idempotente do
+   * schema e permissões POSIX.
    *
-   * Cria `memories_fts` com `tokenize='unicode61 remove_diacritics 2'`, de modo
-   * que "inferência" e "inferencia" (com/sem acento) tokenizem para a MESMA
-   * representação e casem de forma idêntica tanto no índice quanto na query.
-   *
-   * Migração idempotente: um DB pré-existente criado sem `remove_diacritics`
-   * mantém o DDL antigo no `sqlite_master` (o `CREATE VIRTUAL TABLE IF NOT
-   * EXISTS` nunca o alteraria). Detectamos essa configuração legada e
-   * reconstruímos a tabela virtual + `rebuild` do índice a partir do conteúdo
-   * de `memories` (a FTS é derivada; nenhum dado de memória é perdido).
+   * Envelope semântico: qualquer falha de infraestrutura (permissão de
+   * escrita, banco bloqueado, arquivo ilegível) sai como
+   * `DatabaseInitError` — com caminho e orientação de ação — em vez de um
+   * `SQLiteError` cru. Os erros JÁ semânticos (`MigrationError`,
+   * `SchemaVersionError`) passam intactos, porque nomeiam o passo/versão
+   * exatos do problema.
    */
-  private ensureFtsTable() {
-    const existing = this.db.query<{ sql: string | null }, []>(
-      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'"
-    ).get();
+  private init() {
+    try {
+      this.db.exec("PRAGMA journal_mode = WAL;");
+      this.db.exec("PRAGMA busy_timeout = 5000;");
+      // TICKET-DREAMS-04: esteira determinística de migrações (PRAGMA user_version).
+      this.applyMigrations();
+      // Reparo idempotente: garante o schema mesmo se o arquivo foi criado por
+      // outra ferramenta (ou por uma versão anterior do plugin).
+      this.ensureSchemaObjects();
+      // TICKET-DREAMS-04: permissões POSIX do banco, do WAL e do SHM.
+      this.enforcePermissions();
+    } catch (error) {
+      if (error instanceof MigrationError || error instanceof SchemaVersionError) {
+        throw error;
+      }
+      throw new DatabaseInitError(this.dbPath, error);
+    }
+  }
 
-    const legacyTokenizer =
-      !!existing?.sql && !/remove_diacritics/i.test(existing.sql);
+  /**
+   * Aplica, em ordem, os passos de migração pendentes (`version` > atual).
+   *
+   * Cada passo roda em `BEGIN EXCLUSIVE TRANSACTION` e grava o
+   * `PRAGMA user_version` NOVO como última instrução da transação: schema e
+   * versão avançam juntos (ou nenhum dos dois). Um banco gravado por uma
+   * versão mais nova do plugin NÃO é "des-migrado" — o erro é explícito.
+   */
+  private applyMigrations(): void {
+    const current = readSchemaVersion(this.db);
 
-    if (legacyTokenizer) {
-      this.db.exec("DROP TABLE IF EXISTS memories_fts;");
+    if (current > SCHEMA_VERSION) {
+      throw new SchemaVersionError(current, SCHEMA_VERSION);
     }
 
-    this.db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-        fact,
-        category,
-        content='memories',
-        content_rowid='id',
-        tokenize='unicode61 remove_diacritics 2'
+    const pending = MIGRATIONS.filter((step) => step.version > current).sort(
+      (a, b) => a.version - b.version
+    );
+
+    for (const step of pending) {
+      this.runMigration(step);
+    }
+  }
+
+  /**
+   * Executa UM passo de migração em transação exclusiva. Em falha: `ROLLBACK`
+   * (desfaz DDL e versão juntos) e erro semântico com o nome do passo.
+   *
+   * O `BEGIN EXCLUSIVE TRANSACTION` fica DENTRO do `try` de propósito: a
+   *aquisição do lock pode falhar ANTES de qualquer escrita (arquivo
+   * somente-leitura, banco bloqueado por outro processo) e essa falha também
+   * precisa sair como `MigrationError` — identificando o passo — em vez de
+   * vazar um `SQLiteError` cru e genérico. Nesses casos o `ROLLBACK` é
+   * inofensivo: sem transação ativa ele apenas falha e é descartado.
+   */
+  private runMigration(step: MigrationStep): void {
+    if (!Number.isInteger(step.version) || step.version < 0) {
+      throw new Error(
+        `Passo de migração inválido ('${step.name}'): a versão deve ser um inteiro >= 0.`
       );
-    `);
-
-    if (legacyTokenizer) {
-      // Repopula o índice externo a partir da tabela de conteúdo.
-      this.db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild');");
     }
+
+    try {
+      this.db.exec("BEGIN EXCLUSIVE TRANSACTION");
+      step.apply(this.db);
+      // Atualização ATÔMICA da versão (mesma transação do DDL acima).
+      this.db.exec(`PRAGMA user_version = ${step.version}`);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch (rollbackError) {
+        // A transação pode já ter sido desfeita pelo próprio SQLite — ou
+        // nunca ter sido aberta (falha na aquisição do BEGIN).
+        ignoreError(rollbackError);
+      }
+      throw new MigrationError(step, error);
+    }
+  }
+
+  /**
+   * Garante que o schema esperado exista. Idempotente e segura para rodar em
+   * toda abertura: `CREATE ... IF NOT EXISTS` + o reparo do tokenizer legado
+   * da FTS (que pode ter sido derrubado junto com a tabela virtual).
+   */
+  private ensureSchemaObjects(): void {
+    ensureMemoriesTable(this.db);
+    ensureFtsTable(this.db);
+    ensureFtsTriggers(this.db);
+  }
+
+  /**
+   * TICKET-DREAMS-04 — Permissões POSIX dos artefatos SQLite: `0o600` no
+   * banco e nos arquivos WAL/SHM.
+   *
+   * O SQLite só cria `-wal`/`-shm` na PRIMEIRA escrita, com o umask do
+   * processo (tipicamente `0o644`). Uma transação de escrita vazia força a
+   * criação determinística dos dois arquivos aqui — para que o `chmod` abaixo
+   * seja garantido desde a abertura, e não só depois do próximo insert.
+   */
+  private enforcePermissions(): void {
+    try {
+      this.db.exec("BEGIN IMMEDIATE; COMMIT;");
+    } catch (error) {
+      // best-effort: banco bloqueado por outro processo.
+      ignoreError(error);
+    }
+    enforceFileMode(this.dbPath);
+    enforceFileMode(`${this.dbPath}-wal`);
+    enforceFileMode(`${this.dbPath}-shm`);
   }
 
   /**
@@ -433,8 +779,9 @@ export class DreamsDB {
       try {
         const records = this.db.query<MemoryRecord, any[]>(sql).all(...params);
         return this.touchRecall(records);
-      } catch {
+      } catch (error) {
         // Fallback para LIKE se, ainda assim, a query FTS for rejeitada.
+        ignoreError(error);
       }
     }
 

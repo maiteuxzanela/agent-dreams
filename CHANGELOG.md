@@ -16,31 +16,39 @@ nativamente pelo Bun.
 > **Nota de versionamento (verificada no registry em 2026-10-21).** O identificador
 > `1.0.2` **já está ocupado** no registry npm por um *stage build* publicado em
 > 2026-10-19T17:30:52Z (37 arquivos, incluindo a suíte interna `tests/`).
-> O registry não aceita republicação do mesmo identificador: o corte de release do
-> conjunto de mudanças abaixo exigia **bump para `1.0.3`**, que foi aplicado de forma
-> coordenada entre `package.json` (`1.0.3`), *tag* de release (`v1.0.3`) e
-> `CHANGELOG.md` (seção `## [1.0.3]`), conforme a seção de release abaixo.
+> O registry não aceita republicação do mesmo identificador.
+> O identificador `1.0.3` foi preparado de forma coordenada (`package.json`,
+> `MCP_SERVER_VERSION` e `CHANGELOG.md`), mas **nunca foi publicado**: nenhuma
+> release `v1.0.3` existiu no GitHub (`git ls-remote --tags origin` não retorna
+> nenhuma *tag*). Como o conteúdo previsto para `1.0.3` nunca saiu do repositório,
+> o corte de release foi **elevado para `1.0.4`**, que absorve integralmente o
+> conjunto de `1.0.3` e soma a **Reconciliação Cognitiva do Sono REM**
+> (`TICKET-DREAMS-06`, `TICKET-DREAMS-06A` e `TICKET-DREAMS-06-FIX`).
 > O workflow de publicação (`publish.yml`) bloqueia releases cujo *tag* não coincida
 > com a versão declarada — a release correspondente deve ser publicada com a *tag*
-> `v1.0.3`.
+> `v1.0.4`.
 
 ---
 
-## [1.0.3] - 2026-10-21
+## [1.0.4] - 2026-10-21
 
-Corte de release de **refinamento**: preparation final para a publicação no registry
-npm, correção das ressalvas do laudo de *Quality Management* (Portão 2 / Diana) e
-higiene de CI/CD. Nenhuma alteração de schema de dados, de contrato de runtime
-(Bun) ou de comportamento do ciclo cognitivo — as correções são de empacotamento,
-esteira, documentação e permissões de arquivo.
+Corte de release que **absorve** o corte `1.0.3` (nunca publicado no registry) e
+**soma** a primeira entrega funcional do ciclo cognitivo: a **Reconciliação
+Cognitiva do Sono REM** (`TICKET-DREAMS-06` / `TICKET-DREAMS-06A`), já saneada
+pelo laudo de *Quality Management* (Portão 2 / Diana) em `TICKET-DREAMS-06-FIX`.
 
-### Bump coordenado para `1.0.3`
+### Bump coordenado para `1.0.4`
 
-- **Alterado** — `package.json`: `"version"` elevada de `1.0.2` para `1.0.3`,
-  em *lockstep* com a *tag* de release (`v1.0.3`) e a seção deste `CHANGELOG.md`.
-- **Alterado** — `src/mcp/server.ts`: `MCP_SERVER_VERSION` passa de `"1.0.0"` para
-  `"1.0.3"`, eliminando a divergência entre a versão anunciada pelo servidor MCP
+- **Alterado** — `package.json`: `"version"` elevada de `1.0.3` para `1.0.4`,
+  em *lockstep* com a *tag* de release (`v1.0.4`) e a seção deste `CHANGELOG.md`.
+- **Alterado** — `src/mcp/server.ts`: `MCP_SERVER_VERSION` passa de `"1.0.3"` para
+  `"1.0.4"`, mantendo a coerência entre a versão anunciada pelo servidor MCP
   (`initialize` / `serverInfo`) e a versão real do pacote.
+- **Mantido** — a nota de versionamento acima: o identificador `1.0.2` está
+  ocupado por um *stage build* e o `1.0.3` foi preparado mas nunca publicado
+  (nenhuma *tag* `v1.0.3` existiu no repositório). O corte sobe para `1.0.4`
+  para que o registry receba **uma** versão coerente com o estado real da árvore
+  — sem um identificador intermediário jamais publicado.
 - **Removido** — `"scripts"` da lista `"files"` do `package.json`: o diretório
   `scripts/` **não existe** no repositório (os executáveis residem em `bin/`), e a
   entrada gerava ruído no manifesto e alerta de pasta inexistente no empacotamento.
@@ -112,6 +120,76 @@ esteira, documentação e permissões de arquivo.
   ignorados explicitamente. São metadados **locais de máquina** (quadro de
   tarefas e configuração do OpenCode), não artefatos do pacote — sem estas
   entradas, um `git add .` acidental os versionaria no repositório público.
+
+### Funcionalidade — Reconciliação Cognitiva do Sono REM (`TICKET-DREAMS-06` / `06A`)
+
+O REM Sleep deixa de inserir cada fato destilado às cegas: antes de persistir, cada
+memória passa por uma esteira **econômica em duas etapas**, com o trabalho pesado
+na CPU e a IA acionada apenas quando existe uma decisão real a tomar.
+
+- **Adicionado** — `src/core/db.ts`: `findReconciliationCandidates(scope, fact, threshold)`
+  implementa a **triagem léxica** (Etapa 1) via FTS5 + **Jaccard de tokens ≥ 15%**
+  (`RECONCILIATION_SIMILARITY_THRESHOLD = 0.15`), com normalização de minúsculas,
+  diacríticos e pontuação. O **isolamento estrito de escopo** é invariante:
+  `collective` só compara com `collective` e `agent:<nome>` só com o mesmo
+  `agent:<nome>` — a impermeabilidade entre personas nunca é quebrada pela
+  triagem. Fatos abaixo do limiar são **autônomos** e entram no acervo sem
+  consumir modelo algum.
+- **Adicionado** — `src/core/db.ts`: três operações **transacionais**
+  (`BEGIN IMMEDIATE TRANSACTION … COMMIT`, rollback integral em falha):
+  `reinforceMemory` (confirmações + 1, teto 10; score + 0.5, teto 5.0),
+  `supersedeMemory` (revoga a diretriz antiga e insere a nova na mesma
+  transação) e `mergeMemories` (sintetiza o texto unificado, aplica o bônus de
+  score e expurga o registro redundante na mesma transação).
+- **Adicionado** — `src/core/mimo_synthesizer.ts`: julgamento **em lote único** de
+  todos os pares candidatos da noite, com as 4 ações canônicas (`reinforce`,
+  `supersede`, `merge`, `independent`). Falha, ausência de IA ou resposta
+  inválida degrada **todos** os pares para `independent` (fallback
+  determinístico) — nenhuma memória destilada se perde. A redação de segredos
+  (`redactSecrets`) é aplicada de forma idempotente em todos os pontos de
+  entrada.
+- **Adicionado** — `src/core/sleep_cycle.ts`: despacho da Etapa 2 e relatório de
+  auditoria na seção **`## Reconciliações cognitivas`** do `DREAMS.md`, com os
+  identificadores da memória afetada, o escopo e a ação aplicada.
+- **Adicionado** — `README.md`: documentação da esteira de Reconciliação
+  Cognitiva, do limiar de 15% e da semântica das 4 ações.
+
+### Correções do laudo QM — saneamento do Portão 2 (`TICKET-DREAMS-06-FIX`)
+
+- **Corrigido** — `src/core/session_reader.ts`: **anti-recursão** — o título
+  interno `"Dreams Reconciliation"` passou a integrar
+  `DEFAULT_EXCLUDED_SESSION_TITLES`, junto de `"Dreams Synthesis"`. A exclusão
+  ocorre na **camada SQL, antes do `LIMIT`** (o orçamento de leitura não é gasto
+  com sessões internas) e é **revalidada na camada JS** no momento da emissão.
+  A comparação é de título **exato** — prefixo, sufixo e subcadeia **não** são
+  excluídos, para que sessões de trabalho legítimas nunca sejam descartadas.
+- **Corrigido** — `src/core/db.ts`: o teto `MAX_CONFIRMATIONS` passou a ser
+  respeitado em `mergeMemories`
+  (`min(MAX_CONFIRMATIONS, max(existentes, candidata) + 1)`). Sem o teto, a fusão
+  de duas memórias já saturadas (10 + 10) produzia 11 e o contador subia sem
+  limite a cada nova reconciliação — o Tetro de Ebbinghaus deixava de valer e o
+  score do acervo inflava indefinidamente.
+- **Corrigido** — `src/core/sleep_cycle.ts`: a candidata passa a carregar o
+  **peso base da sua categoria** (`CATEGORY_WEIGHTS[...].base_weight`, com `1.0`
+  como fallback) e `confirmations: 1` no despacho do `merge`, em vez de herdar
+  `score`/`confirmations` do registro já existente — o que inflava artificialmente
+  a pontuação da candidata.
+- **Corrigido** — `src/core/sleep_cycle.ts`: **atomicidade da persistência** — as
+  inserções e as reconciliações só são aplicadas quando a síntese é
+  comprovadamente íntegra (`synthesisSucceeded === true`). Uma noite
+  parcialmente sintetizada não deixa **estado parcial** no acervo, e o *handoff*
+  íntegro é reprocessado uma única vez no ciclo seguinte.
+- **Alterado** — suítes `tests/dreams_06_rem_reconciliation.test.ts`,
+  `tests/dreams_06a_reconciliation_db.test.ts` e
+  `tests/dreams_06b_reconciliation_ai.test.ts`: **sanitização open source** — os
+  identificadores de persona usados como escopo de memória foram substituídos por
+  personas genéricas públicas (`agent:architect`, `agent:reviewer`,
+  `agent:developer`), para que o repositório público não exponha nomes de
+  personas privadas.
+- **Adicionado** — `tests/dreams_06fix_sdet_audit.test.ts`: suíte determinística
+  de auditoria que prova, contra bancos SQLite reais, o saneamento acima
+  (anti-recursão na camada SQL, saturação de `MAX_CONFIRMATIONS`, neutralidade
+  de score da candidata e atomicidade da persistência).
 
 ---
 

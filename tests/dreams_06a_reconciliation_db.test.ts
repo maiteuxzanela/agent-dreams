@@ -9,8 +9,8 @@
  * Cenários cobertos:
  *   1. Limiar de 15%: Jaccard < 0.15 ⇒ nenhum candidato; >= 0.15 ⇒ candidato
  *      devolvido, ORDENADO por similaridade DECRESCENTE.
- *   2. ISOLAMENTO ESTRITO DE ESCOPO: 'agent:silas' jamais reconcilia com
- *      'collective' ou 'agent:dante' — mesmo com 100% de similaridade léxica.
+ *   2. ISOLAMENTO ESTRITO DE ESCOPO: 'agent:reviewer' jamais reconcilia com
+ *      'collective' ou 'agent:architect' — mesmo com 100% de similaridade léxica.
  *   3. `reinforceMemory`: confirmações +1 (teto 10), score +0.5 (teto 5.0),
  *      last_reinforced = now.
  *   4. `supersedeMemory`: remoção FÍSICA da diretriz revogada, diretriz nova
@@ -175,14 +175,14 @@ describe("DREAMS-06A — Cenário 2: isolamento estrito de escopo", () => {
   beforeAll(() => {
     // Estado ADVERSARIAL materializado via segunda conexão REAL: o mesmo
     // texto EXATO (100% de similaridade léxica) em 'collective' e
-    // 'agent:dante'. A API pública (insertMemory) promove/reforça entre
+    // 'agent:architect'. A API pública (insertMemory) promove/reforça entre
     // escopos por hierarquia cross-scope (TICKET-DREAMS-04) — mas a camada
     // de reconciliação precisa ser IMUNE mesmo que esse estado exista no
     // banco (importação de backup, migração, etc.).
     const raw = openRaw(SCOPES_DB_PATH);
     try {
       const now = new Date().toISOString();
-      for (const targetScope of ["collective", "agent:dante"]) {
+      for (const targetScope of ["collective", "agent:architect"]) {
         raw.run(
           `INSERT INTO memories (scope, fact, category, score, decay_weight, recall_count, confirmations, last_reinforced, created_at)
            VALUES (?, ?, 'decision', 2.0, 1.0, 0, 1, ?, ?)`,
@@ -198,14 +198,14 @@ describe("DREAMS-06A — Cenário 2: isolamento estrito de escopo", () => {
     dbScoped.close();
   });
 
-  test("2.1: o texto idêntico existe em 'collective' E em 'agent:dante'", () => {
+  test("2.1: o texto idêntico existe em 'collective' E em 'agent:architect'", () => {
     const rows = dbScoped.getAllMemories().filter((m) => m.fact === FACT_IDENTICAL);
     const scopes = rows.map((r) => r.scope).sort();
-    expect(scopes).toEqual(["agent:dante", "collective"]);
+    expect(scopes).toEqual(["agent:architect", "collective"]);
   });
 
-  test("2.2: 'agent:silas' NUNCA recebe candidatos de 'collective' nem de 'agent:dante'", () => {
-    const candidates = dbScoped.findReconciliationCandidates("agent:silas", FACT_IDENTICAL);
+  test("2.2: 'agent:reviewer' NUNCA recebe candidatos de 'collective' nem de 'agent:architect'", () => {
+    const candidates = dbScoped.findReconciliationCandidates("agent:reviewer", FACT_IDENTICAL);
     expect(candidates).toEqual([]);
   });
 
@@ -214,33 +214,33 @@ describe("DREAMS-06A — Cenário 2: isolamento estrito de escopo", () => {
     expect(collective.length).toBe(1);
     expect(collective[0]!.scope).toBe("collective");
 
-    const dante = dbScoped.findReconciliationCandidates("agent:dante", FACT_IDENTICAL);
-    expect(dante.length).toBe(1);
-    expect(dante[0]!.scope).toBe("agent:dante");
+    const architect = dbScoped.findReconciliationCandidates("agent:architect", FACT_IDENTICAL);
+    expect(architect.length).toBe(1);
+    expect(architect[0]!.scope).toBe("agent:architect");
 
-    const silas = dbScoped.findReconciliationCandidates("agent:silas", FACT_IDENTICAL);
-    expect(silas.every((c) => c.scope === "agent:silas")).toBe(true);
+    const reviewer = dbScoped.findReconciliationCandidates("agent:reviewer", FACT_IDENTICAL);
+    expect(reviewer.every((c) => c.scope === "agent:reviewer")).toBe(true);
   });
 
   test("2.4: a fusão NUNCA expurga registro de outro escopo", () => {
-    const danteId = dbScoped.getAllMemories().find(
-      (m) => m.scope === "agent:dante" && m.fact === FACT_IDENTICAL
+    const architectId = dbScoped.getAllMemories().find(
+      (m) => m.scope === "agent:architect" && m.fact === FACT_IDENTICAL
     )!.id!;
     const collectiveId = dbScoped.getAllMemories().find(
       (m) => m.scope === "collective" && m.fact === FACT_IDENTICAL
     )!.id!;
 
-    // Fusão INDESMENTIDA: o alvo é de 'collective', o candidato é de 'agent:dante'.
-    // O registro de 'agent:dante' NÃO pode ser tocado (isolamento).
+    // Fusão INDESMENTIDA: o alvo é de 'collective', o candidato é de 'agent:architect'.
+    // O registro de 'agent:architect' NÃO pode ser tocado (isolamento).
     dbScoped.mergeMemories(
       collectiveId,
-      { fact: FACT_IDENTICAL, category: "decision", scope: "agent:dante" },
+      { fact: FACT_IDENTICAL, category: "decision", scope: "agent:architect" },
       "regra fundamental do deploy exige revisao humana e aprovacao do lead"
     );
 
-    expect(dbScoped.getMemoryById(danteId)).toBeDefined();
-    expect(dbScoped.getMemoryById(danteId)!.scope).toBe("agent:dante");
-    expect(dbScoped.getMemoryById(danteId)!.fact).toBe(FACT_IDENTICAL);
+    expect(dbScoped.getMemoryById(architectId)).toBeDefined();
+    expect(dbScoped.getMemoryById(architectId)!.scope).toBe("agent:architect");
+    expect(dbScoped.getMemoryById(architectId)!.fact).toBe(FACT_IDENTICAL);
     expect(dbScoped.getMemoryById(collectiveId)).toBeDefined();
   });
 });
@@ -269,7 +269,7 @@ describe("DREAMS-06A — Cenário 3: reinforceMemory", () => {
   });
 
   test("3.2: tetos canônicos — confirmações no máximo 10 e score no máximo 5.0", () => {
-    const id = dbReinforce.insertMemory("agent:silas", "preferencia maxima de titulo", "preference", 5.0, 0.1);
+    const id = dbReinforce.insertMemory("agent:reviewer", "preferencia maxima de titulo", "preference", 5.0, 0.1);
     const record = dbReinforce.getMemoryById(id)!;
 
     for (let i = 0; i < 15; i++) {
@@ -360,17 +360,17 @@ describe("DREAMS-06A — Cenário 4: supersedeMemory", () => {
   });
 
   test("4.5: o fato substituto é redigido (idempotência) e o escopo é respeitado", () => {
-    const oldId = dbSupersede.insertMemory("agent:silas", "chave de api rotacionada mensalmente", "pitfall");
+    const oldId = dbSupersede.insertMemory("agent:reviewer", "chave de api rotacionada mensalmente", "pitfall");
     const newId = dbSupersede.supersedeMemory(
       oldId,
       `chave ${FAKE_KEY} rotacionada mensalmente`,
       "pitfall",
-      "agent:silas"
+      "agent:reviewer"
     );
     const created = dbSupersede.getMemoryById(newId)!;
     expect(created.fact).toBe(redactSecrets(`chave ${FAKE_KEY} rotacionada mensalmente`));
     expect(created.fact).not.toContain(FAKE_KEY);
-    expect(created.scope).toBe("agent:silas");
+    expect(created.scope).toBe("agent:reviewer");
   });
 });
 
@@ -419,8 +419,8 @@ describe("DREAMS-06A — Cenário 5: mergeMemories", () => {
   });
 
   test("5.1b: o bônus de score é TETADO em 5.0 (nunca ultrapassa o teto)", () => {
-    const existingId = dbMerge.insertMemory("agent:silas", "prioridade maxima de deploy no cluster", "preference", 4.9, 0.1);
-    const candidateId = dbMerge.insertMemory("agent:silas", "prioridade maxima de deploy no servidor", "preference", 4.9, 0.1);
+    const existingId = dbMerge.insertMemory("agent:reviewer", "prioridade maxima de deploy no cluster", "preference", 4.9, 0.1);
+    const candidateId = dbMerge.insertMemory("agent:reviewer", "prioridade maxima de deploy no servidor", "preference", 4.9, 0.1);
     expect(candidateId).not.toBe(existingId);
 
     dbMerge.mergeMemories(
@@ -428,7 +428,7 @@ describe("DREAMS-06A — Cenário 5: mergeMemories", () => {
       {
         fact: dbMerge.getMemoryById(candidateId)!.fact,
         category: "preference",
-        scope: "agent:silas",
+        scope: "agent:reviewer",
         score: 4.9,
         confirmations: 4,
       },
@@ -486,15 +486,15 @@ describe("DREAMS-06A — Cenário 5: mergeMemories", () => {
   });
 
   test("5.4: o escopo e a categoria da memória sobrevivente são PRESERVADOS", () => {
-    const existingId = dbMerge.insertMemory("agent:dante", "relatorio de incidente sai toda sexta", "pitfall");
-    const candidateId = dbMerge.insertMemory("agent:dante", "relatorio de incidente sai todo dia util", "pitfall");
+    const existingId = dbMerge.insertMemory("agent:architect", "relatorio de incidente sai toda sexta", "pitfall");
+    const candidateId = dbMerge.insertMemory("agent:architect", "relatorio de incidente sai todo dia util", "pitfall");
 
     dbMerge.mergeMemories(
       existingId,
       {
         fact: dbMerge.getMemoryById(candidateId)!.fact,
         category: "learning",
-        scope: "agent:dante",
+        scope: "agent:architect",
         score: 1.0,
         confirmations: 1,
       },
@@ -502,15 +502,15 @@ describe("DREAMS-06A — Cenário 5: mergeMemories", () => {
     );
 
     const merged = dbMerge.getMemoryById(existingId)!;
-    expect(merged.scope).toBe("agent:dante");
+    expect(merged.scope).toBe("agent:architect");
     expect(merged.category).toBe("pitfall");
   });
 
   test("5.5: o fato unificado é redigido antes de tocar o disco", () => {
-    const existingId = dbMerge.insertMemory("agent:silas", "segredo de build fica no cofre", "pitfall");
+    const existingId = dbMerge.insertMemory("agent:reviewer", "segredo de build fica no cofre", "pitfall");
     const mergedId = dbMerge.mergeMemories(
       existingId,
-      { fact: "segredo de build fica no cofre", category: "pitfall", scope: "agent:silas" },
+      { fact: "segredo de build fica no cofre", category: "pitfall", scope: "agent:reviewer" },
       `segredo de build ${FAKE_KEY} fica no cofre`
     );
     const merged = dbMerge.getMemoryById(mergedId)!;
@@ -624,14 +624,14 @@ describe("DREAMS-06A — Cenário 6: atomicidade transacional", () => {
     try {
       raw.exec(`
         CREATE TRIGGER fail_supersede_insert AFTER INSERT ON memories
-        WHEN NEW.scope = 'agent:dante'
+        WHEN NEW.scope = 'agent:architect'
         BEGIN
           SELECT RAISE(ABORT, 'falha simulada na insercao da diretriz nova');
         END;
       `);
 
       expect(() =>
-        dbAtomic.supersedeMemory(oldId, "publicar em sextas exige checklist", "decision", "agent:dante")
+        dbAtomic.supersedeMemory(oldId, "publicar em sextas exige checklist", "decision", "agent:architect")
       ).toThrow();
     } finally {
       raw.exec("DROP TRIGGER IF EXISTS fail_supersede_insert;");

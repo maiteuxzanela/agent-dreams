@@ -479,10 +479,15 @@ export class SleepCycle {
    * Fluxo:
    *  1. consome o diálogo do Light Sleep (`dialogue_pending.txt`);
    *  2. PARTICIONA o diálogo em chunks sequenciais seguros (`chunkDialogueText`);
-   *  3. `synthesizeMemories(chunk)` para CADA chunk, agregando as memórias;
-   *  4. `db.insertMemory(scope, fact, category)` para cada memória destilada;
-   *  5. escreve DREAMS.md e atualiza as projeções (COLLECTIVE/personas);
-   *  6. limpa o handoff apenas se TODOS os chunks tiverem sido sintetizados.
+   *  3. `synthesizeMemories(chunk)` para CADA chunk, ACUMULANDO as memórias
+   *     destiladas (nenhuma escrita no banco ainda);
+   *  4. [SÓ com a síntese ÍNTEGRA] triagem léxica (Etapa 1) e
+   *     `db.insertMemory(scope, fact, category)` para cada memória autônoma;
+   *  5. [SÓ com a síntese ÍNTEGRA] julgamento neural em LOTE (Etapa 2) e
+   *     despacho das 4 ações transacionais (`reinforce`/`supersede`/`merge`/
+   *     `independent`);
+   *  6. escreve DREAMS.md e atualiza as projeções (COLLECTIVE/personas);
+   *  7. limpa o handoff apenas se TODOS os chunks tiverem sido sintetizados.
    *
    * TICKET-DREAMS-08 (Frente 8A): a ingestão é INTEGRAL. Dias com >120.000
    * caracteres são fatiados em múltiplos chunks (manhã, tarde e noite) e cada
@@ -490,6 +495,13 @@ export class SleepCycle {
    * truncamento invertido `[… início do dia omitido]`. Uma falha em QUALQUER
    * chunk adia a consolidação inteira: o handoff permanece 100% íntegro e o
    * checkpoint de síntese NÃO avança (sem amnésia parcial, sem dados falsos).
+   *
+   * TICKET-DREAMS-06-FIX (RESSALVA DE ATOMICIDADE): a persistência no SQLite
+   * (passos 4 e 5) é ATÓMICA em relação à síntese — nada é gravado se
+   * `synthesisSucceeded !== true`. Uma noite parcialmente sintetizada não
+   * deixa estado parcial no acervo (nem memórias órfãs, nem reconciliações
+   * já despachadas): o retry do ciclo seguinte reprocessa o handoff íntegro
+   * uma única vez.
    *
    * Resiliência e anti-mock: sem IA disponível, o ciclo preserva
    * `dialogue_pending.txt` intacto para o próximo ciclo tentar novamente,
@@ -507,6 +519,18 @@ export class SleepCycle {
      * acumulados na Etapa 1 (triagem léxica de CPU) e enviados em UM lote.
      */
     const reconciliationPairs: ReconciliationPair[] = [];
+    /**
+     * TICKET-DREAMS-06-FIX (RESSALVA DE ATOMICIDADE) — memórias destiladas
+     * aguardam a persistência. NENHUMA escrita no SQLite (nem `insertMemory`,
+     * nem as 4 ações de reconciliação) acontece antes de o ciclo saber que
+     * TODOS os chunks foram sintetizados com sucesso. Sem esta barreira, uma
+     * falha em um chunk intermediário deixava o acervo em ESTADO PARCIAL: as
+     * memórias dos chunks anteriores já estavam gravadas e a reconciliação
+     * neural já tinha sido despachada, enquanto o handoff permanecia íntegro
+     * para o retry — ou seja, a mesma noite era sintetizada DUAS vezes
+     * (duplicação silenciosa do acervo).
+     */
+    const distilledMemories: SynthesizedMemory[] = [];
     let distilledCounter = 0;
     let synthError: string | null = null;
     let synthesisSucceeded = false;
@@ -529,47 +553,16 @@ export class SleepCycle {
           });
           sources.push(result.source);
           if (result.error) synthError = result.error;
+          // TICKET-DREAMS-06-FIX: a destilação é ACUMULADA em memória; a
+          // triagem e a persistência só acontecem depois do veredito de
+          // integridade da síntese (abaixo).
           for (const mem of result.memories) {
-            // TICKET-DREAMS-06 (Frente B) — ETAPA 1 (CPU): triagem léxica.
-            // A varredura é ESTRITAMENTE do mesmo escopo do fato destilado
-            // (o `DreamsDB` garante o isolamento); Jaccard < 15% significa
-            // "fato autônomo" — entra direto no SQLite, sem consumir IA.
-            const candidates = this.db.findReconciliationCandidates(
-              mem.scope,
-              mem.fact,
-              RECONCILIATION_SIMILARITY_THRESHOLD
-            );
-
-            if (candidates.length === 0) {
-              this.db.insertMemory(mem.scope, mem.fact, mem.category);
-              newMemories.push(mem);
-              distilledCounter++;
-              continue;
-            }
-
-            // Jaccard >= 15%: o fato vira CANDIDATO e vai para o julgamento
-            // neural em lote. Ele NÃO é inserido agora — a inserção (ou a
-            // absorção/revogação/fusão) é decidida na Etapa 2.
-            const candidateKey = `m${distilledCounter++}`;
-            for (const candidate of candidates.slice(0, MAX_CANDIDATES_PER_MEMORY)) {
-              if (typeof candidate.id !== "number") continue;
-              if (reconciliationPairs.length >= MAX_RECONCILIATION_PAIRS) break;
-              reconciliationPairs.push({
-                index: reconciliationPairs.length,
-                existingId: candidate.id,
-                scope: mem.scope,
-                existingFact: candidate.fact,
-                candidateFact: mem.fact,
-                candidateCategory: mem.category,
-                candidateKey,
-              });
-            }
-            newMemories.push(mem);
+            distilledMemories.push(mem);
           }
           completed++;
           console.log(
             `[REM Sleep] Chunk ${i + 1}/${chunks.length} (${result.source}): ` +
-              `${result.memories.length} memória(s) inserida(s)` +
+              `${result.memories.length} memória(s) destilada(s)` +
               `${result.dropped > 0 ? `, ${result.dropped} descartada(s)` : ""}` +
               `${result.error ? ` — ${result.error}` : ""}.`
           );
@@ -591,9 +584,64 @@ export class SleepCycle {
       synthesisSucceeded = completed === chunks.length;
     }
 
-    // TICKET-DREAMS-06 (Frente B) — ETAPA 2 (Neural): julgamento em LOTE das
-    // triagens da Etapa 1 e despacho das 4 ações transacionais.
-    const reconciliations = await this.runReconciliation(reconciliationPairs);
+    // TICKET-DREAMS-06-FIX (RESSALVA DE ATOMICIDADE): a Etapa 1 (triagem
+    // léxica de CPU) e a Etapa 2 (julgamento neural + 4 ações transacionais)
+    // só são disparadas com a síntese ÍNTEGRA. Uma noite parcial NÃO deixa
+    // rastro no acervo.
+    let reconciliations: ReconciliationOutcome[] = [];
+    if (synthesisSucceeded) {
+      // TICKET-DREAMS-06 (Frente B) — ETAPA 1 (CPU): triagem léxica.
+      // A varredura é ESTRITAMENTE do mesmo escopo do fato destilado
+      // (o `DreamsDB` garante o isolamento); Jaccard < 15% significa
+      // "fato autônomo" — entra direto no SQLite, sem consumir IA.
+      //
+      // A ordem de percurso é a ordem de destilação: cada memória autônoma já
+      // inserida É vista pela triagem das seguintes (como no fluxo original),
+      // de modo que a Etapa 1 continua sendo uma varredura do acervo em
+      // evolução.
+      for (const mem of distilledMemories) {
+        const candidates = this.db.findReconciliationCandidates(
+          mem.scope,
+          mem.fact,
+          RECONCILIATION_SIMILARITY_THRESHOLD
+        );
+
+        if (candidates.length === 0) {
+          this.db.insertMemory(mem.scope, mem.fact, mem.category);
+          newMemories.push(mem);
+          distilledCounter++;
+          continue;
+        }
+
+        // Jaccard >= 15%: o fato vira CANDIDATO e vai para o julgamento
+        // neural em lote. Ele NÃO é inserido agora — a inserção (ou a
+        // absorção/revogação/fusão) é decidida na Etapa 2.
+        const candidateKey = `m${distilledCounter++}`;
+        for (const candidate of candidates.slice(0, MAX_CANDIDATES_PER_MEMORY)) {
+          if (typeof candidate.id !== "number") continue;
+          if (reconciliationPairs.length >= MAX_RECONCILIATION_PAIRS) break;
+          reconciliationPairs.push({
+            index: reconciliationPairs.length,
+            existingId: candidate.id,
+            scope: mem.scope,
+            existingFact: candidate.fact,
+            candidateFact: mem.fact,
+            candidateCategory: mem.category,
+            candidateKey,
+          });
+        }
+        newMemories.push(mem);
+      }
+
+      // TICKET-DREAMS-06 (Frente B) — ETAPA 2 (Neural): julgamento em LOTE das
+      // triagens da Etapa 1 e despacho das 4 ações transacionais.
+      reconciliations = await this.runReconciliation(reconciliationPairs);
+    } else {
+      console.warn(
+        `[REM Sleep] Persistência adiada: a síntese não foi íntegra ` +
+          `(${distilledMemories.length} memória(s) destilada(s) NÃO gravada(s)).`
+      );
+    }
 
     // Fonte reportada: a do último chunk concluído (ou "none" sem diálogo).
     const source: SynthesisSource = sources.length > 0 ? sources[sources.length - 1] : "none";
@@ -739,14 +787,21 @@ export class SleepCycle {
 
         if (action === "merge") {
           const mergedFact = mergedFacts.get(pair.index) ?? pair.candidateFact;
+          // TICKET-DREAMS-06-FIX (BLOQUEANTE 3): a candidata é um FATO NOVO,
+          // não a mesma memória já existente. Herdar `existing.score` e
+          // `existing.confirmations` inflava a fusão com a relevância que a
+          // candidata jamais teve (duas vezes a evidência, uma vez o fato).
+          // A candidata entra com o peso canônico da SUA categoria e com
+          // UMA confirmação (ela acabou de ser destilada — o histórico de
+          // confirmações pertence ao fato sobrevivente).
           this.db.mergeMemories(
             pair.existingId,
             {
               fact: pair.candidateFact,
               category: pair.candidateCategory,
               scope: pair.scope,
-              score: existing.score,
-              confirmations: existing.confirmations,
+              score: CATEGORY_WEIGHTS[pair.candidateCategory]?.base_weight ?? 1.0,
+              confirmations: 1,
             },
             mergedFact
           );

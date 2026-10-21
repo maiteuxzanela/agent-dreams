@@ -17,7 +17,7 @@
  *   4. Sono REM ponta a ponta:
  *      4.1 Jaccard < 15% ⇒ inserção direta, SEM nenhuma chamada de IA extra;
  *      4.2 Jaccard >= 15% ⇒ lote neural e despacho das 4 ações;
- *      4.3 isolamento de escopo: `agent:silas` nunca reconcilia com `collective`;
+ *      4.3 isolamento de escopo: `agent:reviewer` nunca reconcilia com `collective`;
  *      4.4 DREAMS.md reflete as reconciliações efetuadas.
  */
 import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
@@ -43,8 +43,8 @@ const E1 = "backup do banco de memorias roda todo dia as 3h"; // collective
 const M1 = "backup do banco de memorias roda semanalmente as 4h"; // collective (J≈0.58)
 const E2 = "metricas de latencia sao publishadas no painel interno"; // collective
 const M2 = "metricas de latencia aparecem no painel de operacoes"; // collective (J≈0.50)
-const E3 = "relatorio de incidente sai toda sexta para o gestor"; // agent:silas
-const M3 = "relatorio de incidente sai todo dia util para o gestor"; // agent:silas (J≈0.58)
+const E3 = "relatorio de incidente sai toda sexta para o gestor"; // agent:reviewer
+const M3 = "relatorio de incidente sai todo dia util para o gestor"; // agent:reviewer (J≈0.58)
 const M4 = "implantar balanceador eletroneico na fazenda remota"; // isolado (J=0)
 const M5 = "assinar contrato anual com a seguradora"; // isolado (J=0)
 
@@ -373,7 +373,7 @@ describe("DREAMS-06B — Cenário 4: esteira de reconciliação no Sono REM", ()
     const memories = JSON.stringify([
       { scope: "collective", category: "learning", fact: M1 },
       { scope: "collective", category: "learning", fact: M2 },
-      { scope: "agent:silas", category: "decision", fact: M3 },
+      { scope: "agent:reviewer", category: "decision", fact: M3 },
       { scope: "collective", category: "learning", fact: M4 },
     ]);
     const reconciliation = JSON.stringify([
@@ -392,7 +392,7 @@ describe("DREAMS-06B — Cenário 4: esteira de reconciliação no Sono REM", ()
       // parameter) — inseridas pela API pública.
       const e1Id = db.insertMemory("collective", E1, "learning", 2.0, 1.0);
       const e2Id = db.insertMemory("collective", E2, "learning", 2.0, 1.0);
-      const e3Id = db.insertMemory("agent:silas", E3, "decision", 2.0, 1.0);
+      const e3Id = db.insertMemory("agent:reviewer", E3, "decision", 2.0, 1.0);
 
       process.env.OPENCODE_BIN = fixture.bin;
       await withoutOffline(async () => {
@@ -404,7 +404,7 @@ describe("DREAMS-06B — Cenário 4: esteira de reconciliação no Sono REM", ()
       const reconStdin = fixture.stdin(2);
       expect(reconStdin).toContain("Reconciliador Cognitivo");
       expect(reconStdin).toContain("escopo=collective");
-      expect(reconStdin).toContain("escopo=agent:silas");
+      expect(reconStdin).toContain("escopo=agent:reviewer");
 
       // --- ação REINFORCE: a existente absorve a candidata (score +0.5, conf +1).
       const e1 = db.getMemoryById(e1Id)!;
@@ -422,14 +422,14 @@ describe("DREAMS-06B — Cenário 4: esteira de reconciliação no Sono REM", ()
 
       // --- ação SUPERSEDE: a diretriz revogada é removida FISICAMENTE.
       expect(db.getMemoryById(e3Id)).toBeNull();
-      const silas = db.getAllMemories().filter((m) => m.scope === "agent:silas");
-      expect(silas).toHaveLength(1);
-      expect(silas[0]!.fact).toBe(M3);
+      const reviewer = db.getAllMemories().filter((m) => m.scope === "agent:reviewer");
+      expect(reviewer).toHaveLength(1);
+      expect(reviewer[0]!.fact).toBe(M3);
 
       // --- Jaccard < 15%: inserção direta, sem passar pelo julgamento.
       expect(db.getAllMemories().some((m) => m.fact.includes("balanceador eletroneico"))).toBe(true);
 
-      // --- ISOLAMENTO DE ESCOPO: M3 (agent:silas) jamais tocou o coletivo.
+      // --- ISOLAMENTO DE ESCOPO: M3 (agent:reviewer) jamais tocou o coletivo.
       const collective = db.getAllMemories().filter((m) => m.scope === "collective");
       expect(collective.some((m) => m.fact.includes("relatorio de incidente"))).toBe(false);
       expect(collective.some((m) => m.fact === E3)).toBe(false);
@@ -473,7 +473,7 @@ describe("DREAMS-06B — Cenário 4: esteira de reconciliação no Sono REM", ()
 
   test("4.5: candidato 'independent' de persona entra NA SUA persona (nunca no coletivo)", async () => {
     const memories = JSON.stringify([
-      { scope: "agent:silas", category: "decision", fact: M3 },
+      { scope: "agent:reviewer", category: "decision", fact: M3 },
     ]);
     const reconciliation = JSON.stringify([{ pair: 0, action: "independent" }]);
     const fixture = makeFixture("persona", memories, reconciliation);
@@ -483,16 +483,16 @@ describe("DREAMS-06B — Cenário 4: esteira de reconciliação no Sono REM", ()
 
     const db = new DreamsDB(path.join(baseDir, "dreams.db"));
     try {
-      db.insertMemory("agent:silas", E3, "decision", 2.0, 1.0);
+      db.insertMemory("agent:reviewer", E3, "decision", 2.0, 1.0);
       process.env.OPENCODE_BIN = fixture.bin;
       await withoutOffline(async () => {
         await new SleepCycle(db, { baseDir }).remSleep();
       });
 
       // A candidata independente entra na SUA persona...
-      const silas = db.getAllMemories().filter((m) => m.scope === "agent:silas");
-      expect(silas.some((m) => m.fact === M3)).toBe(true);
-      expect(silas.some((m) => m.fact === E3)).toBe(true); // a existente permanece
+      const reviewer = db.getAllMemories().filter((m) => m.scope === "agent:reviewer");
+      expect(reviewer.some((m) => m.fact === M3)).toBe(true);
+      expect(reviewer.some((m) => m.fact === E3)).toBe(true); // a existente permanece
       // ...e NUNCA vaza para o coletivo.
       const collective = db.getAllMemories().filter((m) => m.scope === "collective");
       expect(collective.some((m) => m.fact === M3)).toBe(false);

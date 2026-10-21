@@ -586,7 +586,14 @@ describe("DREAMS-06 SDET — D: bônus de score e unificação de confirmações
   });
 
   test("D.4: as confirmações também são TETADAS em 10 (MAX_CONFIRMATIONS)", () => {
-    expect(mergeWith(1.0, 9, 1.0, 9).confirmations).toBe(10);
+    // TICKET-DREAMS-06-FIX (BLOQUEANTE 2): o caso DISCRIMINADOR é o par já
+    // saturado. Antes do teto, max(10, 10) + 1 = 11 (e crescia sem limite a
+    // cada nova fusão); agora satura EXATAMENTE no teto canônico.
+    expect(mergeWith(1.0, 10, 1.0, 10).confirmations).toBe(10);
+    expect(mergeWith(1.0, 10, 1.0, 12).confirmations).toBe(10);
+    // Abaixo do teto o +1 continua valendo (o teto não congela o contador).
+    expect(mergeWith(1.0, 8, 1.0, 9).confirmations).toBe(10);
+    expect(mergeWith(1.0, 1, 1.0, 1).confirmations).toBe(2);
   });
 
   test("D.5: a fusão preserva o escopo e a categoria do SOBREVIVENTE", () => {
@@ -631,7 +638,7 @@ const SYNTH_PAYLOAD = JSON.stringify([
   { scope: "collective", category: "learning", fact: C_REIN },
   { scope: "collective", category: "decision", fact: C_SUP },
   { scope: "collective", category: "learning", fact: C_MRG },
-  { scope: "agent:silas", category: "pitfall", fact: C_IND },
+  { scope: "agent:reviewer", category: "pitfall", fact: C_IND },
 ]);
 
 describe("DREAMS-06 SDET — E: julgamento neural das 4 ações no Sono REM", () => {
@@ -652,7 +659,7 @@ describe("DREAMS-06 SDET — E: julgamento neural das 4 ações no Sono REM", ()
     eReinId = db.insertMemory("collective", E_REIN, "learning");
     eSupId = db.insertMemory("collective", E_SUP, "decision");
     eMrgId = db.insertMemory("collective", E_MRG, "learning");
-    eIndId = db.insertMemory("agent:silas", E_IND, "pitfall");
+    eIndId = db.insertMemory("agent:reviewer", E_IND, "pitfall");
   });
 
   afterAll(() => {
@@ -681,8 +688,8 @@ describe("DREAMS-06 SDET — E: julgamento neural das 4 ações no Sono REM", ()
 
     // --- SUPERSEDE: a diretriz revogada é removida FISICAMENTE e a nova entra.
     expect(db.getMemoryById(eSupId)).toBeNull();
-    const silasScope = db.getAllMemories().filter((m) => m.scope === "collective");
-    const replacement = silasScope.find((m) => m.fact === C_SUP);
+    const collectiveScope = db.getAllMemories().filter((m) => m.scope === "collective");
+    const replacement = collectiveScope.find((m) => m.fact === C_SUP);
     expect(replacement).toBeDefined();
     expect(replacement!.scope).toBe("collective");
     // Metadados de relevância herdados da diretriz revogada (score de 'decision').
@@ -699,7 +706,7 @@ describe("DREAMS-06 SDET — E: julgamento neural das 4 ações no Sono REM", ()
     expect(db.recall("observabilidade externa", "collective").map((r) => r.fact)).toContain(MERGED_FACT);
 
     // --- INDEPENDENT: os dois lados permanecem, no MESMO escopo.
-    const personaRows = db.getAllMemories().filter((m) => m.scope === "agent:silas");
+    const personaRows = db.getAllMemories().filter((m) => m.scope === "agent:reviewer");
     expect(personaRows).toHaveLength(2);
     const original = personaRows.find((m) => m.fact === E_IND)!;
     const inserted = personaRows.find((m) => m.fact === C_IND)!;
@@ -723,7 +730,7 @@ describe("DREAMS-06 SDET — E: julgamento neural das 4 ações no Sono REM", ()
 
   test("E.2: as 4 ações NUNCA tocam memória de outro escopo", async () => {
     // O acervo anterior já provou o isolamento por escopo; aqui verificamos
-    // que o RELATÓRIO também é escopado (nenhuma linha de 'agent:silas'
+    // que o RELATÓRIO também é escopado (nenhuma linha de 'agent:reviewer'
     // aparece como 'collective' e vice-versa).
     const markdown = fs.readFileSync(path.join(baseDir, "DREAMS.md"), "utf-8");
     const section = markdown.split("## Reconciliações cognitivas")[1] ?? "";
@@ -749,7 +756,7 @@ describe("DREAMS-06 SDET — E3: resposta INVÁLIDA do modelo ⇒ fallback deter
       db.insertMemory("collective", E_REIN, "learning"),
       db.insertMemory("collective", E_SUP, "decision"),
       db.insertMemory("collective", E_MRG, "learning"),
-      db.insertMemory("agent:silas", E_IND, "pitfall"),
+      db.insertMemory("agent:reviewer", E_IND, "pitfall"),
     ];
     const before = existingIds.map((id) => db.getMemoryById(id)!);
 
@@ -778,7 +785,7 @@ describe("DREAMS-06 SDET — E3: resposta INVÁLIDA do modelo ⇒ fallback deter
       });
 
       // O escopo é respeitado: a candidata de persona entrou na persona.
-      const personaFacts = db.getAllMemories().filter((m) => m.scope === "agent:silas").map((m) => m.fact);
+      const personaFacts = db.getAllMemories().filter((m) => m.scope === "agent:reviewer").map((m) => m.fact);
       expect(personaFacts).toContain(C_IND);
       expect(db.getAllMemories().some((m) => m.scope === "collective" && m.fact.includes("balanceador"))).toBe(false);
     } finally {
@@ -890,6 +897,53 @@ describe("DREAMS-06 SDET — F: modo offline e resiliência do ciclo de sono", (
     expect(mixed.decisions[0]!.action).toBe("reinforce");
     expect(mixed.dropped).toBe(1);
   });
+});
+
+// ===========================================================================
+// CENÁRIO G — CORREÇÃO DO SCORE DA CANDIDATA NO DESPACHO DE `merge`.
+// ===========================================================================
+
+describe("DREAMS-06 SDET — G: a candidata entra com o peso da SUA categoria", () => {
+  test("G.1: merge NÃO herda o score da existente — usa CATEGORY_WEIGHTS da candidata", async () => {
+    // Existente: categoria 'learning' (base_weight 1.0, 1 confirmação).
+    const EXISTING = "painel de metricas internas do time";
+    // Candidata: MESMA regra lexical, mas classificada como 'preference' (2.5).
+    const CANDIDATE = "painel de metricas internas do time ACAO MERGE";
+    const payload = JSON.stringify([
+      { scope: "collective", category: "preference", fact: CANDIDATE },
+    ]);
+    const fixture = makeBinaryFixture("merge_candidate_weight", payload, "normal");
+    const baseDir = makeDreamsDir("merge_candidate_weight_dreams");
+    const db = new DreamsDB(path.join(baseDir, "dreams.db"));
+
+    try {
+      const existingId = db.insertMemory("collective", EXISTING, "learning");
+      const before = db.getMemoryById(existingId)!;
+      expect(before.score).toBeCloseTo(1.0, 10);
+      expect(before.confirmations).toBe(1);
+
+      await withEnv({ DREAMS_OFFLINE: undefined, OPENCODE_BIN: fixture.bin }, async () => {
+        await new SleepCycle(db, { baseDir }).remSleep();
+      });
+
+      const merged = db.getMemoryById(existingId)!;
+      // DISCRIMINADOR: a candidata vale o base_weight da SUA categoria (2.5).
+      //   nova regra  → min(5.0, max(1.0, 2.5) + 0.5) = 3.0
+      //   herança     → min(5.0, max(1.0, 1.0) + 0.5) = 1.5  (aqui: 1.5)
+      expect(merged.score).toBeCloseTo(3.0, 10);
+      expect(merged.score).not.toBeCloseTo(1.5, 10);
+      // A candidata entra com UMA confirmação (recém-destilada).
+      expect(merged.confirmations).toBe(2);
+      // A fusão sintetiza o TEXTO: categoria/escopo do sobrevivente preservados.
+      expect(merged.category).toBe("learning");
+      expect(merged.scope).toBe("collective");
+      expect(merged.fact).toBe(
+        "latencia painel interno metricas e observabilidade externa consolidada"
+      );
+    } finally {
+      db.close();
+    }
+  }, 60_000);
 });
 
 afterAll(() => {

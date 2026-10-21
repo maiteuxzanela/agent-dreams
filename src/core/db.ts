@@ -1033,14 +1033,23 @@ export class DreamsDB {
       );
 
       // Consolidação das confirmações: max(confirmations_A, confirmations_B) + 1.
+      //
+      // TICKET-DREAMS-06-FIX (BLOQUEANTE 2): o resultado é TETADO em
+      // `MAX_CONFIRMATIONS` (10). Sem o teto, a fusão de duas memórias já
+      // saturadas (10 + 10) produzia 11 e a partir dali o contador subia
+      // sem limite a cada nova reconciliação — o Tetro de Ebbinghaus
+      // (que satura em `min(confirmations, 10)`) deixava de valer e o score
+      // do acervo inflava indefinidamente.
       const existingConfirmations = Number.isFinite(existing.confirmations)
         ? existing.confirmations
         : 1;
       const candidateConfirmations = Number.isFinite(candidate?.confirmations)
         ? (candidate.confirmations as number)
         : 1;
-      const nextConfirmations =
-        Math.max(existingConfirmations, candidateConfirmations) + 1;
+      const nextConfirmations = Math.min(
+        DreamsDB.MAX_CONFIRMATIONS,
+        Math.max(existingConfirmations, candidateConfirmations) + 1
+      );
 
       // 1. SINTETIZA o fato unificado na memória sobrevivente (FTS5 via trigger).
       this.db.run(

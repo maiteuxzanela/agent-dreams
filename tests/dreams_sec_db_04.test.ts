@@ -850,7 +850,12 @@ describe("[DREAMS-04/3] session_reader.ts: checagem preventiva de schema", () =>
   });
 
   test("a lista padrão de títulos excluídos é a canônica", () => {
-    expect([...DEFAULT_EXCLUDED_SESSION_TITLES]).toEqual(["Dreams Synthesis"]);
+    // TICKET-DREAMS-06-FIX: os DOIS títulos internos do Dreams são excluídos —
+    // a síntese diária e o julgamento neural de reconciliação.
+    expect([...DEFAULT_EXCLUDED_SESSION_TITLES]).toEqual([
+      "Dreams Synthesis",
+      "Dreams Reconciliation",
+    ]);
   });
 });
 

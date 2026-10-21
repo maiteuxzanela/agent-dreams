@@ -128,9 +128,39 @@ const MESSAGES_MIXED: FixtureMessage[] = [
 const WINDOW = { sinceMs: NOW - 10 * MIN, untilMs: NOW, includeReasoning: false };
 
 describe("TICKET-DREAMS-01B — filtro anti-recursão de sessões internas", () => {
-  test("constante canônica expõe exatamente o título de síntese do Dreams", () => {
+  test("constante canônica expõe exatamente os títulos internos do Dreams", () => {
     expect(Array.isArray(DEFAULT_EXCLUDED_SESSION_TITLES)).toBe(true);
-    expect(DEFAULT_EXCLUDED_SESSION_TITLES).toEqual(["Dreams Synthesis"]);
+    // TICKET-DREAMS-06-FIX (BLOQUEANTE 1): além da síntese diária, o
+    // julgamento neural de reconciliação do Sono REM também é uma sessão
+    // interna do Dreams e jamais pode virar matéria-prima do dia seguinte.
+    expect(DEFAULT_EXCLUDED_SESSION_TITLES).toEqual([
+      "Dreams Synthesis",
+      "Dreams Reconciliation",
+    ]);
+  });
+
+  test("default: sessão 'Dreams Reconciliation' é 100% filtrada do diálogo (anti-recursão)", () => {
+    const dbPath = buildDb({
+      name: "reconciliation_filter",
+      sessions: [
+        { id: "ses_recon", data: { title: "Dreams Reconciliation" } },
+        { id: "ses_synth", data: { title: "Dreams Synthesis" } },
+        { id: "ses_normal", data: { title: "Conversa comum da usuária" } },
+      ],
+      messages: [
+        { id: "m_recon", session: "ses_recon", t: NOW - 500, role: "user", texts: ["PROMPT_DE_JULGAMENTO_NEURAL_NAO_DEVE_VAZAR"] },
+        { id: "m_synth", session: "ses_synth", t: NOW - 1000, role: "user", texts: ["CONTEUDO_SINTESE_INTERNA_NAO_DEVE_VAZAR"] },
+        { id: "m_normal", session: "ses_normal", t: NOW - 9000, role: "user", texts: ["dialogo normal legitimo"] },
+      ],
+    });
+    const entries = readRecentDialogues({ dbPath, ...WINDOW });
+
+    // Nenhum vestígio das DUAS sessões internas.
+    expect(entries.some((e) => e.session_id === "ses_recon")).toBe(false);
+    expect(entries.some((e) => e.text.includes("PROMPT_DE_JULGAMENTO_NEURAL"))).toBe(false);
+    expect(entries.some((e) => e.session_id === "ses_synth")).toBe(false);
+    // A sessão legítima continua sendo lida normalmente.
+    expect(entries.map((e) => e.session_id)).toEqual(["ses_normal"]);
   });
 
   test("default: sessão 'Dreams Synthesis' é 100% filtrada e não retorna no diálogo", () => {

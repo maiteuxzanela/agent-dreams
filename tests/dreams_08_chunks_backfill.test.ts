@@ -522,14 +522,19 @@ describe("DREAMS-08A — remSleep processa cada chunk sequencialmente", () => {
       const markdown = fs.readFileSync(path.join(baseDir, "DREAMS.md"), "utf-8");
       expect(markdown).toContain("**adiada**");
 
-      // Só os chunks EFETIVAMENTE concluídos (1 e 2) viraram memória;
-      // nenhum dado inventado para o chunk que falhou.
+      // TICKET-DREAMS-06-FIX (RESSALVA DE ATOMICIDADE): a persistência é
+      // ATÔMICA em relação à síntese. Nenhuma memória — nem as dos chunks 1 e
+      // 2, que concluíram — é gravada quando um chunk intermediário falha.
+      // Antes da correção, o acervo ficava em ESTADO PARCIAL e a mesma noite
+      // era sintetizada de novo no retry (duplicação silenciosa).
       const facts = db.getAllMemories().map((m) => m.fact);
-      expect(facts.some((f) => f.includes("Memoria do chunk 1 referencia"))).toBe(true);
-      expect(facts.some((f) => f.includes("Memoria do chunk 2 referencia"))).toBe(true);
+      expect(facts.some((f) => f.includes("Memoria do chunk 1 referencia"))).toBe(false);
+      expect(facts.some((f) => f.includes("Memoria do chunk 2 referencia"))).toBe(false);
       expect(facts.some((f) => f.includes(`Memoria do chunk ${expectedChunks} referencia`))).toBe(
         false
       );
+      // O acervo permanece exatamente como estava: vazio.
+      expect(db.getAllMemories()).toHaveLength(0);
     } finally {
       db.close();
     }

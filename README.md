@@ -129,7 +129,48 @@ LLM externa.
   2. `opencode/mimo-v2.6-flash-free` (degrau gratuito de fallback).
   3. `opencode-go/deepseek-v4.1-flash` (terceiro degrau de contingência).
 * **Política Anti-Falsificação:** Se nenhum modelo de IA estiver disponível ou em modo `DREAMS_OFFLINE=1`, o sistema **não inventa fatos**. Ele emite um erro explícito e mantém `dialogue_pending.txt` intacto no disco para reprocessar na noite seguinte.
-* **Adiamento atômico:** uma falha em **qualquer** chunk adia a consolidação **inteira** — o handoff permanece 100% íntegro no disco, e o `dialogue_pending.txt` só é removido quando **todos** os chunks foram sintetizados com sucesso.
+* **Adiamento atômico:** uma falha em **qualquer** chunk adia a consolidação **inteira** — o handoff permanece 100% íntegro no disco, e o `dialogue_pending.txt` só é removido quando **todos** os chunks foram sintetizados com sucesso. A persistência no SQLite é **atômica em relação à síntese**: nenhuma memória é gravada (nem `insertMemory`, nem reconciliações) se algum chunk falhar — uma noite parcialmente sintetizada não deixa **estado parcial** no acervo, e o retry do ciclo seguinte reprocessa o handoff íntegro **uma única vez**.
+
+#### Reconciliação Cognitiva do Sono REM (duas etapas)
+
+Antes de virar memória durável, cada fato destilado passa por uma esteira
+**econômica em duas etapas** — o trabalho pesado fica na CPU e a IA só é
+acionada quando há uma decisão real a tomar:
+
+1. **Etapa 1 — Triagem léxica (CPU, zero tokens de IA).** Para cada fato
+   destilado, o `DreamsDB.findReconciliationCandidates` varre o acervo via
+   **FTS5 + Jaccard de tokens** (minúsculas, diacríticos e pontuação
+   normalizados) restrito ao **mesmo escopo** e ao limiar **≥ 15%**:
+   * **Jaccard < 15%** ⇒ o fato é **autônomo** e entra direto no SQLite, sem
+     consumir modelo algum;
+   * **Jaccard ≥ 15%** ⇒ o fato é **reclamado como candidato** e segue para a
+     Etapa 2 (ele **não** é inserido ainda — evita duplicar conteúdo).
+   O **isolamento estrito de escopo** é invariante: `collective` só compara com
+   `collective`, e `agent:<nome>` só com o mesmo `agent:<nome>` — a
+   impermeabilidade entre personas nunca é quebrada pela triagem.
+2. **Etapa 2 — Julgador neural (lote único).** Todos os pares candidatos da
+   noite são enviados em **um único lote** ao modelo, que decide entre
+   **4 ações** transacionais:
+
+   | Ação | Semântica | Efeito transacional |
+   |---|---|---|
+   | `reinforce` | A candidata **confirma** a memória existente | `confirmations + 1` (teto 10), `score + 0.5` (teto 5.0), `last_reinforced = now` |
+   | `supersede` | A candidata **substitui/revoga** a diretriz antiga | Remove fisicamente o registro antigo e insere o fato novo (mesma transação) |
+   | `merge` | As duas formulações são a **mesma regra** | Sintetiza o texto unificado, bônus de score e expurgo do redundante (mesma transação) |
+   | `independent` | Falso positivo lexical; os fatos **coexistem** | A candidata é inserida como memória nova no seu escopo |
+
+   **Resiliência:** falha, ausência de IA ou resposta inválida degrada
+   **todos** os pares para `independent` (fallback determinístico) — nenhuma
+   memória destilada se perde. Cada ação roda em transação `BEGIN IMMEDIATE …
+   COMMIT` (rollback total em falha), e o resultado é auditado no `DREAMS.md`
+   na seção **`## Reconciliações cognitivas`**.
+
+> **Anti-recursão:** tanto a síntese (`--title "Dreams Synthesis"`) quanto o
+> julgamento de reconciliação (`--title "Dreams Reconciliation"`) rodam como
+> sessões internas do OpenCode. Os **dois títulos** estão na lista canônica
+> `DEFAULT_EXCLUDED_SESSION_TITLES` do Light Sleep, de modo que o trabalho
+> interno de uma noite nunca é reprocessado como diálogo de usuário na
+> seguinte.
 
 ### 3. Deep Sleep (`src/core/sleep_cycle.ts`)
 * Aplica decaimento temporal exponencial baseado no tempo desde o último reforço (`last_reinforced`, com fallback em `created_at`), com **amortecimento sublinear (logarítmico) do uso** — repetições triviais não inflam o score linearmente:

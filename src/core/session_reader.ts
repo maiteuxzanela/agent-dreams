@@ -13,11 +13,19 @@
  *  - Ruído descartado: `type: "tool"` (payloads binários / saídas de bash
  *    gigantescas), `step-start`, `step-finish`, `patch`, `file`, `compaction`.
  *
- * Defesa anti-recursão: sessões internas de síntese do Dreams (título padrão
- * `"Dreams Synthesis"`) são excluídas em duas camadas — filtro SQL via
- * `session.data.title` e revalidação em JS no momento da emissão — de modo que
- * a síntese de um dia nunca seja reprocessada como diálogo de usuário no dia
- * seguinte. A lista é configurável por `excludeSessionTitles`.
+ * Defesa anti-recursão: sessões internas do Dreams (títulos canônicos
+ * `"Dreams Synthesis"` — a síntese diária — e `"Dreams Reconciliation"` — o
+ * julgamento neural de reconciliação do Sono REM) são excluídas em duas
+ * camadas — filtro SQL via `session.data.title` e revalidação em JS no
+ * momento da emissão — de modo que a síntese (ou a reconciliação) de um dia
+ * nunca seja reprocessada como diálogo de usuário no dia seguinte. A lista é
+ * configurável por `excludeSessionTitles`.
+ *
+ * TICKET-DREAMS-06-FIX (BLOQUEANTE 1): o título `"Dreams Reconciliation"`
+ * entrou na lista canônica porque o julgamento neural de reconciliação roda
+ * como um processo `opencode run --title "Dreams Reconciliation"` — sem esta
+ * exclusão, o PRÓPRIO julgamento da noite seria ingerido como diálogo de
+ * usuário no ciclo seguinte (auto-alimentação recursiva do acervo).
  *
  * NUNCA lança exceção não tratada: banco inexistente, vazio, corrompido ou
  * indisponível retornam `[]` (fail-soft; o erro é apenas repassado ao
@@ -56,8 +64,16 @@ export type DialogKind = "text" | "reasoning";
  * de usuário (defesa anti-recursão: a síntese de um dia não pode virar
  * matéria-prima do dia seguinte). Comparação exata contra
  * `json_extract(session.data, '$.title')`.
+ *
+ * - `"Dreams Synthesis"` — a síntese diária (REM Sleep).
+ * - `"Dreams Reconciliation"` — o julgamento neural de reconciliação
+ *   (REM Sleep, TICKET-DREAMS-06): também é um processo interno do Dreams e
+ *   jamais pode reentrar no acervo como diálogo de usuário.
  */
-export const DEFAULT_EXCLUDED_SESSION_TITLES: readonly string[] = ["Dreams Synthesis"];
+export const DEFAULT_EXCLUDED_SESSION_TITLES: readonly string[] = [
+  "Dreams Synthesis",
+  "Dreams Reconciliation",
+];
 
 /** Um trecho do diálogo, já normalizado e agrupado por mensagem. */
 export interface DialogEntry {
@@ -107,11 +123,11 @@ export interface SessionReaderOptions {
   maxTextLength?: number;
   /**
    * Títulos de sessão a excluir da leitura (comparação exata contra
-   * `session.data.title`). Padrão: `["Dreams Synthesis"]`. Passe `[]` para
-   * desligar a exclusão. Quando a tabela `session` não existe (schema
-   * divergente), a exclusão degrada para vazio — e a divergência é REPORTADA
-   * via `onError` (sem abortar a leitura), porque a defesa anti-recursão
-   * fica inativa.
+   * `session.data.title`). Padrão: `["Dreams Synthesis", "Dreams Reconciliation"]`.
+   * Passe `[]` para desligar a exclusão. Quando a tabela `session` não existe
+   * (schema divergente), a exclusão degrada para vazio — e a divergência é
+   * REPORTADA via `onError` (sem abortar a leitura), porque a defesa
+   * anti-recursão fica inativa.
    */
   excludeSessionTitles?: readonly string[];
   /**
@@ -458,9 +474,10 @@ export function readRecentDialogues(options: SessionReaderOptions = {}): DialogE
     }
 
     // 0) Defesa anti-recursão (camada 1 — SQL): resolve os IDs das sessões
-    //    internas do Dreams ("Dreams Synthesis") ANTES da query quente, para
-    //    que o LIMIT já incida sobre o conjunto filtrado. Fail-soft: tabela
-    //    ausente → lista vazia, sem afetar a leitura normal.
+    //    internas do Dreams ("Dreams Synthesis" e "Dreams Reconciliation")
+    //    ANTES da query quente, para que o LIMIT já incida sobre o conjunto
+    //    filtrado. Fail-soft: tabela ausente → lista vazia, sem afetar a
+    //    leitura normal.
     const excludedSessionIds = collectExcludedSessionIds(db, excludeSessionTitles);
     const excludedSessionIdSet = new Set(excludedSessionIds);
 

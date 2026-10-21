@@ -379,6 +379,87 @@ export function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   return union === 0 ? 0 : intersection / union;
 }
 
+/**
+ * TICKET-DREAMS-06 (Frente A) — Limiar canônico da triagem léxica do Sono REM.
+ *
+ * 0,15 (15%) é o ponto de corte entre "fato autônomo" (entra direto no SQLite,
+ * sem consumir tokens de IA) e "candidato a reconciliação" (segue para o
+ * julgamento neural em lote daquela noite).
+ *
+ * Calibração: bem mais permissivo que `FACT_SIMILARITY_THRESHOLD` (0,80), que
+ * decide EQUIVALÊNCIA semântica dentro do `insertMemory`. Aqui o objetivo é
+ * apenas RECLAMAR um par para julgamento neural — a decisão final
+ * (reinforce/supersede/merge/independent) é do modelo, não do limiar.
+ */
+export const RECONCILIATION_SIMILARITY_THRESHOLD = 0.15;
+
+/**
+ * Teto de linhas varridas pelo FTS5 em uma triagem de reconciliação.
+ *
+ * A varredura é AMPLA de propósito: o corte fino é o Jaccard (≥ 15%), não o
+ * limite de linhas. 2000 linhas cobrem folgadamente o acervo real sem varrer o
+ * banco inteiro; o corte final é determinístico (ordem do `id`).
+ */
+export const RECONCILIATION_CANDIDATE_LIMIT = 2000;
+
+/**
+ * TICKET-DREAMS-06 — Falha semântica numa operação de reconciliação.
+ *
+ * Existe para que uma reconciliação impossível (memória inexistente, fato
+ * vazio, escopo inválido) saia IDENTIFICÁVEL — com a operação e a causa — em
+ * vez de um `SQLiteError` cru. NUNCA é engolida: a transação é revertida e o
+ * erro sobe para o chamador.
+ */
+export class ReconciliationError extends Error {
+  /** Operação que falhou (`reinforceMemory`, `supersedeMemory`, `mergeMemories`). */
+  readonly operation: string;
+  readonly cause: unknown;
+
+  constructor(operation: string, message: string, cause?: unknown) {
+    super(`Falha na reconciliação de memórias (${operation}): ${message}`);
+    this.name = "ReconciliationError";
+    this.operation = operation;
+    this.cause = cause;
+  }
+}
+
+/**
+ * Candidato de fusão: o fato novo (ou pré-existente) que será fundido na
+ * memória `existingId`. `score`/`confirmations` são opcionais — quando
+ * ausentes, valem os canônicos (1.0 e 1).
+ */
+export interface MergeCandidate {
+  fact: string;
+  category: MemoryCategory;
+  scope: string;
+  score?: number;
+  confirmations?: number;
+}
+
+/** Normaliza um limiar de similaridade para a faixa válida `[0, 1]`. */
+function normalizeReconciliationThreshold(threshold: number): number {
+  if (typeof threshold !== "number" || !Number.isFinite(threshold)) {
+    return RECONCILIATION_SIMILARITY_THRESHOLD;
+  }
+  if (threshold < 0) return 0;
+  if (threshold > 1) return 1;
+  return threshold;
+}
+
+/**
+ * Constrói uma query FTS5 com filtro de COLUNA (`fact : (...)`).
+ *
+ * O filtro de coluna restringe o casamento ao texto do fato — sem ele, uma
+ * palavra como "learning" (nome de categoria) puxaria para o conjunto de
+ * candidatos TODAS as memórias daquela categoria, poluindo a triagem de 15%.
+ * Os tokens vêm de `normalizeFactText` (apenas `\p{L}`/`\p{N}`), então nunca
+ * carregam a sintaxe do dialeto MATCH.
+ */
+function buildFtsFactColumnQuery(tokens: Set<string>): string {
+  const terms = [...tokens].map((token) => `"${token}"`).join(" OR ");
+  return `fact : (${terms})`;
+}
+
 export class DreamsDB {
   // DEF-10: limites de reforço — eventos triviais repetitivos (ex.: session.idle)
   // não podem inflar score/confirmations indefinidamente.
@@ -388,6 +469,16 @@ export class DreamsDB {
   private db: Database;
   /** Caminho absoluto do arquivo SQLite (usado no enforcement POSIX). */
   private readonly dbPath: string;
+  /**
+   * Profundidade da transação SQLite em curso (0 = fora de transação).
+   *
+   * O SQLite NÃO aceita `BEGIN` aninhado ("cannot start a transaction within
+   * a transaction"). O contador torna as operações transacionais RE-ENTRANTES:
+   * uma chamada interna dentro de uma transação aberta participa dela (a
+   * atomicidade já está garantida pela transação externa) em vez de tentar
+   * abrir uma segunda.
+   */
+  private txDepth: number = 0;
 
   constructor(dbPath?: string) {
     const finalPath = path.resolve(
@@ -648,18 +739,331 @@ export class DreamsDB {
   }
 
   /**
+   * TICKET-DREAMS-06 (Frente A) — Execução transacional EXCLUSIVA.
+   *
+   * `BEGIN IMMEDIATE TRANSACTION` obtém o lock RESERVED já no início: a
+   * transação de escrita é a única admitida, e nenhum leitor concorrente
+   * consegue ler estados intermediários. O `COMMIT` só ocorre se o corpo
+   * termina sem erro; qualquer exceção dispara `ROLLBACK` (desfaz DML E FTS5
+   * juntos, pois os triggers participam da mesma transação) e o erro sobe
+   * intacto.
+   *
+   * RE-ENTRÂNCIA: se já existe uma transação aberta (contador `txDepth > 0`),
+   * o corpo roda dentro dela — abrir um segundo `BEGIN` seria erro do SQLite.
+   * A atomicidade continua garantida: é a transação EXTERNA que a assegura.
+   */
+  private runExclusiveTransaction<T>(fn: () => T): T {
+    if (this.txDepth > 0) {
+      return fn();
+    }
+
+    this.db.exec("BEGIN IMMEDIATE TRANSACTION");
+    this.txDepth = 1;
+    try {
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch (rollbackError) {
+        // A transação pode já ter sido desfeita pelo próprio SQLite (ou o
+        // BEGIN pode ter falhado antes de abrir). O ROLLBACK é inofensivo.
+        ignoreError(rollbackError);
+      }
+      throw error;
+    } finally {
+      this.txDepth = 0;
+    }
+  }
+
+  /**
+   * Busca uma memória pelo id. Devolve `null` quando o registro não existe.
+   */
+  public getMemoryById(id: number): MemoryRecord | null {
+    if (!Number.isInteger(id)) return null;
+    const row = this.db.query<MemoryRecord, [number]>(
+      "SELECT * FROM memories WHERE id = ?"
+    ).get(id);
+    return row ?? null;
+  }
+
+  /**
    * Reforço limitado e canônico (DEF-10): `confirmations + 1` (teto
    * `MAX_CONFIRMATIONS`), `score + 0.5` (teto `MAX_SCORE`) e
    * `last_reinforced = now`.
+   *
+   * TICKET-DREAMS-06: tornado OPÉRÇÃO TRANSACIONAL (`BEGIN IMMEDIATE`) e
+   * PÚBLICO — o Sono REM despacha a ação `reinforce` por esta API. O `now` é
+   * opcional: sem ele, usa o instante corrente (ISO-8601).
    */
-  private reinforceMemory(existing: MemoryRecord, now: string): void {
+  public reinforceMemory(existing: MemoryRecord, now?: string): void {
     if (typeof existing.id !== "number") return;
-    const confirmations = Math.min(existing.confirmations + 1, DreamsDB.MAX_CONFIRMATIONS);
-    const nextScore = Math.min(existing.score + 0.5, DreamsDB.MAX_SCORE);
-    this.db.run(
-      "UPDATE memories SET score = ?, confirmations = ?, last_reinforced = ? WHERE id = ?",
-      [nextScore, confirmations, now, existing.id]
-    );
+    // Captura local: o estreitamento de `existing.id` não sobrevive ao
+    // fechamento (o TypeScript não presume imutabilidade de propriedade).
+    const memoryId: number = existing.id;
+    const timestamp = typeof now === "string" && now.length > 0 ? now : new Date().toISOString();
+
+    this.runExclusiveTransaction(() => {
+      const baseConfirmations = Number.isFinite(existing.confirmations)
+        ? existing.confirmations
+        : 0;
+      const baseScore = Number.isFinite(existing.score) ? existing.score : 0;
+      const confirmations = Math.min(
+        DreamsDB.MAX_CONFIRMATIONS,
+        Math.max(0, baseConfirmations + 1)
+      );
+      const nextScore = Math.min(DreamsDB.MAX_SCORE, Math.max(0, baseScore + 0.5));
+      this.db.run(
+        "UPDATE memories SET score = ?, confirmations = ?, last_reinforced = ? WHERE id = ?",
+        [nextScore, confirmations, timestamp, memoryId]
+      );
+    });
+  }
+
+  /**
+   * TICKET-DREAMS-06 (Frente A) — Triagem léxica da Etapa 1 (CPU).
+   *
+   * Varre o acervo via FTS5 e devolve TODOS os candidatos do MESMO escopo com
+   * Jaccard de tokens ≥ `threshold`, ordenados por similaridade DECRESCENTE.
+   *
+   * ISOLAMENTO ESTRITO DE ESCOPO (requisito invariante do TICKET-DREAMS-06):
+   * o filtro `m.scope = ?` é uma IGUALDADE EXATA. Um candidato `collective`
+   * NUNCA é comparado com um fato `agent:<nome>` (e vice-versa) — a
+   * impermeabilidade entre personas é a garantia central do modelo de memória.
+   *
+   * A tokenização é a mesma de `tokenizeFact` (minúsculas, diacríticos
+   * removidos, pontuação descartada) e NÃO aplica stopword filter: o ticket
+   * exige a sobreposição lexical bruta, sem lista de stopwords — quem decide
+   * a semântica final é o julgamento neural, não a triagem.
+   */
+  public findReconciliationCandidates(
+    scope: string,
+    fact: string,
+    threshold: number = RECONCILIATION_SIMILARITY_THRESHOLD
+  ): MemoryRecord[] {
+    const safeScope = typeof scope === "string" ? scope.trim() : "";
+    if (!safeScope) return [];
+
+    // Defesa em profundidade: o fato recebido passa pela redação (idempotente)
+    // antes de qualquer comparação — nenhum segredo participa da tokenização.
+    const sanitized = redactSecrets(typeof fact === "string" ? fact : "");
+    const target = tokenizeFact(sanitized);
+    if (target.size === 0) return [];
+
+    const minSimilarity = normalizeReconciliationThreshold(threshold);
+
+    const sql = `
+      SELECT m.* FROM memories m
+      JOIN memories_fts f ON m.id = f.rowid
+      WHERE memories_fts MATCH ? AND m.scope = ?
+      LIMIT ?
+    `;
+
+    let rows: MemoryRecord[];
+    try {
+      rows = this.db
+        .query<MemoryRecord, any[]>(sql)
+        .all(buildFtsFactColumnQuery(target), safeScope, RECONCILIATION_CANDIDATE_LIMIT);
+    } catch (error) {
+      // Fallback: query sem o filtro de coluna (compatibilidade com um FTS5
+      // mal configurado). A precisão fina continua sendo o Jaccard.
+      ignoreError(error);
+      rows = this.db
+        .query<MemoryRecord, any[]>(sql)
+        .all(this.buildOrFtsQuery(target), safeScope, RECONCILIATION_CANDIDATE_LIMIT);
+    }
+
+    const scored: Array<{ record: MemoryRecord; similarity: number }> = [];
+    for (const row of rows) {
+      const similarity = jaccardSimilarity(target, tokenizeFact(row.fact));
+      if (similarity >= minSimilarity) {
+        scored.push({ record: row, similarity });
+      }
+    }
+
+    // Ordenação determinística: similaridade DESC → score DESC →
+    // confirmações DESC → id ASC (desempate estável e reproduzível).
+    scored.sort((a, b) => {
+      if (b.similarity !== a.similarity) return b.similarity - a.similarity;
+      const scoreDiff = (b.record.score ?? 0) - (a.record.score ?? 0);
+      if (scoreDiff !== 0) return scoreDiff;
+      const confDiff = (b.record.confirmations ?? 0) - (a.record.confirmations ?? 0);
+      if (confDiff !== 0) return confDiff;
+      return (a.record.id ?? 0) - (b.record.id ?? 0);
+    });
+
+    return scored.map((entry) => entry.record);
+  }
+
+  /**
+   * TICKET-DREAMS-06 (Frente A) — Revogação transacional de diretriz.
+   *
+   * Semântica: a diretriz antiga é REMOVIDA FISICAMENTE e a nova entra no
+   * seu lugar, na MESMA transação `BEGIN IMMEDIATE ... COMMIT`. Não existe
+   * estado intermediário observável: um leitor concorrente (o MCP) enxerga
+   * OU a diretriz antiga OU a nova — nunca as duas, nunca nenhuma.
+   *
+   * A remoção do registro antigo dispara o trigger `memories_ad`, que expurga
+   * a linha correspondente do índice FTS5; a inserção dispara `memories_ai`,
+   * que indexa a nova. Os dois participates da mesma transação ⇒ o índice
+   * FTS5 permanece consistente com `memories` em qualquer instante observável.
+   *
+   * Metadados: `score`, `confirmations`, `recall_count` e `created_at` são
+   * HERDADOS da diretriz revogada (a nova diretriz não pode perder a
+   * relevância já conquistada); `decay_weight` segue o canônico da categoria
+   * nova; `last_reinforced` passa a ser o instante da revogação.
+   *
+   * @returns o id do NOVO registro (o antigo é destruído).
+   */
+  public supersedeMemory(
+    oldId: number,
+    newFact: string,
+    category: MemoryCategory,
+    scope: string
+  ): number {
+    const sanitizedFact = redactSecrets(typeof newFact === "string" ? newFact : "").trim();
+    if (!sanitizedFact) {
+      throw new ReconciliationError(
+        "supersedeMemory",
+        "o fato substituto não pode ser vazio após a redação."
+      );
+    }
+    const targetScope = typeof scope === "string" ? scope.trim() : "";
+    if (!targetScope) {
+      throw new ReconciliationError("supersedeMemory", "o escopo não pode ser vazio.");
+    }
+
+    return this.runExclusiveTransaction(() => {
+      const old = this.getMemoryById(oldId);
+      if (!old) {
+        throw new ReconciliationError(
+          "supersedeMemory",
+          `a memória ${oldId} não existe (nada a revogar).`
+        );
+      }
+
+      const now = new Date().toISOString();
+
+      // 1. REMOÇÃO FÍSICA da diretriz revogada (o trigger expurga o FTS5).
+      this.db.run("DELETE FROM memories WHERE id = ?", [oldId]);
+
+      // 2. INSERÇÃO da diretriz nova, herdando os metadados de relevância.
+      const result = this.db.run(
+        `INSERT INTO memories (scope, fact, category, score, decay_weight, recall_count, confirmations, last_reinforced, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          targetScope,
+          sanitizedFact,
+          category,
+          Number.isFinite(old.score) ? old.score : 1.0,
+          CATEGORY_WEIGHTS[category]?.decay_weight ?? old.decay_weight ?? 1.0,
+          old.recall_count ?? 0,
+          old.confirmations ?? 1,
+          now,
+          old.created_at ?? now,
+        ]
+      );
+      return Number(result.lastInsertRowid);
+    });
+  }
+
+  /**
+   * TICKET-DREAMS-06 (Frente A) — Fusão transacional de duas memórias.
+   *
+   * Sintetiza o fato unificado na memória sobrevivente (`existingId`) e
+   * expurga o registro redundante do candidato, tudo dentro da MESMA
+   * transação `BEGIN IMMEDIATE ... COMMIT`:
+   *
+   *   score        = min(5.0, max(existing.score, candidate.score ?? 1.0) + 0.5)
+   *   confirmations= max(existing.confirmations, candidate.confirmations ?? 1) + 1
+   *   last_reinforced = now
+   *
+   * A atualização do texto passa pelos triggers do FTS5 (`memories_au`),
+   * que reindexam o registro; a expurgo do redundante passa por
+   * `memories_ad`, que o remove do índice. Se QUALQUER passo falhar, o
+   * `ROLLBACK` restaura texto, score, confirmações e índice — nenhum estado
+   * intermediário sobrevive.
+   *
+   * Escopo: o redundante é procurado APENAS no escopo do candidato
+   * (`candidate.scope`) — a fusão nunca arrasta registros de outra persona.
+   * `scope`/`category` da memória sobrevivente são PRESERVADOS: a fusão
+   * sintetiza o TEXTO, não reetiqueta a memória.
+   *
+   * @returns o id da memória unificada (sempre `existingId`).
+   */
+  public mergeMemories(
+    existingId: number,
+    candidate: MergeCandidate,
+    mergedFact: string
+  ): number {
+    const sanitizedMerged = redactSecrets(
+      typeof mergedFact === "string" ? mergedFact : ""
+    ).trim();
+    if (!sanitizedMerged) {
+      throw new ReconciliationError(
+        "mergeMemories",
+        "o fato unificado não pode ser vazio após a redação."
+      );
+    }
+    const candidateFact = redactSecrets(
+      typeof candidate?.fact === "string" ? candidate.fact : ""
+    ).trim();
+    const candidateScope = typeof candidate?.scope === "string" ? candidate.scope.trim() : "";
+
+    return this.runExclusiveTransaction(() => {
+      const existing = this.getMemoryById(existingId);
+      if (!existing) {
+        throw new ReconciliationError(
+          "mergeMemories",
+          `a memória ${existingId} não existe (nada para fundir).`
+        );
+      }
+
+      const now = new Date().toISOString();
+
+      // Bônus de confirmação diária: max(score_A, score_B) + 0.5, teto 5.0.
+      const existingScore = Number.isFinite(existing.score) ? existing.score : 0;
+      const candidateScore = Number.isFinite(candidate?.score)
+        ? (candidate.score as number)
+        : 1.0;
+      const nextScore = Math.min(
+        DreamsDB.MAX_SCORE,
+        Math.max(existingScore, candidateScore) + 0.5
+      );
+
+      // Consolidação das confirmações: max(confirmations_A, confirmations_B) + 1.
+      const existingConfirmations = Number.isFinite(existing.confirmations)
+        ? existing.confirmations
+        : 1;
+      const candidateConfirmations = Number.isFinite(candidate?.confirmations)
+        ? (candidate.confirmations as number)
+        : 1;
+      const nextConfirmations =
+        Math.max(existingConfirmations, candidateConfirmations) + 1;
+
+      // 1. SINTETIZA o fato unificado na memória sobrevivente (FTS5 via trigger).
+      this.db.run(
+        "UPDATE memories SET fact = ?, score = ?, confirmations = ?, last_reinforced = ? WHERE id = ?",
+        [sanitizedMerged, nextScore, nextConfirmations, now, existingId]
+      );
+
+      // 2. EXPURGA o registro redundante do candidato (mesma transação).
+      //
+      // ISOLAMENTO ESTRITO DE ESCOPO: o expurgo só ocorre quando o candidato
+      // pertence AO MESMO escopo da memória sobrevivente. Uma fusão disparada
+      // com um candidato de outra persona jamais apaga, altera ou reetiqueta
+      // o registro daquela persona — nem o redundante, nem qualquer outro.
+      if (candidateFact && candidateScope === existing.scope) {
+        this.db.run("DELETE FROM memories WHERE scope = ? AND fact = ? AND id != ?", [
+          candidateScope,
+          candidateFact,
+          existingId,
+        ]);
+      }
+
+      return existingId;
+    });
   }
 
   /**

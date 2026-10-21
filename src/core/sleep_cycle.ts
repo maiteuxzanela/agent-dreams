@@ -1,7 +1,14 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { DreamsDB, MemoryRecord, CATEGORY_WEIGHTS, DREAMS_DIR_MODE, DREAMS_FILE_MODE } from "./db";
+import {
+  DreamsDB,
+  MemoryRecord,
+  CATEGORY_WEIGHTS,
+  DREAMS_DIR_MODE,
+  DREAMS_FILE_MODE,
+  RECONCILIATION_SIMILARITY_THRESHOLD,
+} from "./db";
 import {
   readRecentDialogues,
   buildDialogueSummary,
@@ -9,9 +16,13 @@ import {
 } from "./session_reader";
 import {
   synthesizeMemories,
+  reconcileMemoriesBatch,
   utf8ByteLength,
   type SynthesisSource,
   type SynthesizedMemory,
+  type ReconciliationAction,
+  type ReconciliationDecision,
+  type ReconciliationPair,
 } from "./mimo_synthesizer";
 
 // Diretório base padrão (produção). Testes injetam um baseDir isolado via options.
@@ -71,6 +82,39 @@ export interface SleepCycleOptions {
   /** Janela de horas retroativas do diálogo. Padrão: 24. */
   dialogueHours?: number;
 }
+
+/**
+ * TICKET-DREAMS-06 (Frente B) — Resultado da aplicação de UMA reconciliação.
+ *
+ * Alimenta o relatório `DREAMS.md`: o operador precisa ver o que foi
+ * absorvido, revogado, fundido ou mantido independente.
+ */
+export interface ReconciliationOutcome {
+  action: ReconciliationAction;
+  scope: string;
+  existingId: number;
+  existingFact: string;
+  candidateFact: string;
+  /** Texto unificado (ação `merge`). */
+  mergedFact?: string;
+  /** Id do novo registro (ação `supersede`). */
+  newId?: number;
+  /** A ação foi efetivamente aplicada no banco? */
+  applied: boolean;
+  /** Observação operacional (falha transacional, degradação, revogação em cascata). */
+  note?: string;
+}
+
+/**
+ * Teto de candidatos avaliados por memória destilada.
+ *
+ * Um fato muito genérico pode encontrar dezenas de vizinhos léxicos; limitar
+ * o fan-out por memória mantém o lote noturno bounded (e o prompt, finito).
+ */
+const MAX_CANDIDATES_PER_MEMORY = 3;
+
+/** Teto de pares enviados ao julgamento neural em um único lote noturno. */
+const MAX_RECONCILIATION_PAIRS = 60;
 
 export class SleepCycle {
   private db: DreamsDB;
@@ -458,6 +502,12 @@ export class SleepCycle {
     const chunks = chunkDialogueText(dialogue);
     const newMemories: SynthesizedMemory[] = [];
     const sources: SynthesisSource[] = [];
+    /**
+     * TICKET-DREAMS-06 (Frente B) — pares candidatos ao julgamento neural,
+     * acumulados na Etapa 1 (triagem léxica de CPU) e enviados em UM lote.
+     */
+    const reconciliationPairs: ReconciliationPair[] = [];
+    let distilledCounter = 0;
     let synthError: string | null = null;
     let synthesisSucceeded = false;
 
@@ -480,7 +530,40 @@ export class SleepCycle {
           sources.push(result.source);
           if (result.error) synthError = result.error;
           for (const mem of result.memories) {
-            this.db.insertMemory(mem.scope, mem.fact, mem.category);
+            // TICKET-DREAMS-06 (Frente B) — ETAPA 1 (CPU): triagem léxica.
+            // A varredura é ESTRITAMENTE do mesmo escopo do fato destilado
+            // (o `DreamsDB` garante o isolamento); Jaccard < 15% significa
+            // "fato autônomo" — entra direto no SQLite, sem consumir IA.
+            const candidates = this.db.findReconciliationCandidates(
+              mem.scope,
+              mem.fact,
+              RECONCILIATION_SIMILARITY_THRESHOLD
+            );
+
+            if (candidates.length === 0) {
+              this.db.insertMemory(mem.scope, mem.fact, mem.category);
+              newMemories.push(mem);
+              distilledCounter++;
+              continue;
+            }
+
+            // Jaccard >= 15%: o fato vira CANDIDATO e vai para o julgamento
+            // neural em lote. Ele NÃO é inserido agora — a inserção (ou a
+            // absorção/revogação/fusão) é decidida na Etapa 2.
+            const candidateKey = `m${distilledCounter++}`;
+            for (const candidate of candidates.slice(0, MAX_CANDIDATES_PER_MEMORY)) {
+              if (typeof candidate.id !== "number") continue;
+              if (reconciliationPairs.length >= MAX_RECONCILIATION_PAIRS) break;
+              reconciliationPairs.push({
+                index: reconciliationPairs.length,
+                existingId: candidate.id,
+                scope: mem.scope,
+                existingFact: candidate.fact,
+                candidateFact: mem.fact,
+                candidateCategory: mem.category,
+                candidateKey,
+              });
+            }
             newMemories.push(mem);
           }
           completed++;
@@ -508,6 +591,10 @@ export class SleepCycle {
       synthesisSucceeded = completed === chunks.length;
     }
 
+    // TICKET-DREAMS-06 (Frente B) — ETAPA 2 (Neural): julgamento em LOTE das
+    // triagens da Etapa 1 e despacho das 4 ações transacionais.
+    const reconciliations = await this.runReconciliation(reconciliationPairs);
+
     // Fonte reportada: a do último chunk concluído (ou "none" sem diálogo).
     const source: SynthesisSource = sources.length > 0 ? sources[sources.length - 1] : "none";
 
@@ -519,7 +606,13 @@ export class SleepCycle {
     // `deepSleep` (pós-poda), que sempre roda nesta etapa.
     fs.writeFileSync(
       path.join(this.dreamsDir, "DREAMS.md"),
-      this.renderDreamsMarkdown({ source, synthError, newMemories, allMemories })
+      this.renderDreamsMarkdown({
+        source,
+        synthError,
+        newMemories,
+        allMemories,
+        reconciliations,
+      })
     );
 
     // Frente 2A (C3): consome o handoff SOMENTE se a síntese foi bem-sucedida —
@@ -530,12 +623,198 @@ export class SleepCycle {
     }
   }
 
+  /**
+   * TICKET-DREAMS-06 (Frente B) — ETAPA 2 (Neural): julgamento em LOTE e
+   * despacho das 4 ações.
+   *
+   * Contratos de resiliência (nenhum sono REM é interrompido):
+   *  - Falha/ausência de IA ⇒ o classificador degrada para `independent`
+   *    (fallback determinístico) e todos os candidatos são inseridos como
+   *    memórias novas — NENHUMA memória destilada se perde.
+   *  - Par sem decisão válida ⇒ tratado como `independent`.
+   *  - Falha transacional na aplicação ⇒ o par degrada para `independent`.
+   *
+   * Contrato de isolamento: todas as ações são aplicadas sobre memórias do
+   * MESMO escopo do par (a triagem de `DreamsDB` já o garante).
+   */
+  private async runReconciliation(
+    pairs: ReconciliationPair[]
+  ): Promise<ReconciliationOutcome[]> {
+    const outcomes: ReconciliationOutcome[] = [];
+    if (pairs.length === 0) return outcomes;
+
+    console.log(
+      `[REM Sleep] Reconciliação: ${pairs.length} par(es) candidato(s) a julgamento neural.`
+    );
+
+    const batch = await reconcileMemoriesBatch(pairs, {
+      onError: (error) => console.error("[REM Sleep] Reconciliador:", error),
+    });
+    if (batch.error) {
+      console.warn(`[REM Sleep] Reconciliação neural degradada: ${batch.error}`);
+    }
+
+    const decisionByIndex = new Map<number, ReconciliationDecision>();
+    for (const decision of batch.decisions) {
+      decisionByIndex.set(decision.pairIndex, decision);
+    }
+
+    // Passo 1 — ação efetiva de cada par (par sem decisão ⇒ `independent`).
+    const actions = new Map<number, ReconciliationAction>();
+    const mergedFacts = new Map<number, string>();
+    for (const pair of pairs) {
+      const decision = decisionByIndex.get(pair.index);
+      actions.set(pair.index, decision?.action ?? "independent");
+      if (decision?.mergedFact) mergedFacts.set(pair.index, decision.mergedFact);
+    }
+
+    // Passo 2 — DESTINAÇÃO de cada fato candidato. Se QUALQUER par do
+    // candidato o absorve (reinforce/merge/supersede), ele é absorvido: jamais
+    // é inserido como memória nova (conteúdo duplicado no banco).
+    const disposition = new Map<string, "absorbed" | "independent">();
+    for (const pair of pairs) {
+      const action = actions.get(pair.index) ?? "independent";
+      if (action !== "independent") {
+        disposition.set(pair.candidateKey, "absorbed");
+      } else if (!disposition.has(pair.candidateKey)) {
+        disposition.set(pair.candidateKey, "independent");
+      }
+    }
+
+    // Passo 3 — aplicação no banco.
+    const insertedCandidates = new Set<string>();
+    for (const pair of pairs) {
+      const action = actions.get(pair.index) ?? "independent";
+      const isAbsorbed = disposition.get(pair.candidateKey) === "absorbed";
+      const existing = this.db.getMemoryById(pair.existingId);
+
+      // A memória existente pode ter sido revogada por um par anterior do
+      // mesmo lote (`supersede` remove fisicamente o registro antigo).
+      if (!existing) {
+        if (!isAbsorbed) this.insertReconciledCandidate(pair, insertedCandidates);
+        outcomes.push({
+          action: "independent",
+          scope: pair.scope,
+          existingId: pair.existingId,
+          existingFact: pair.existingFact,
+          candidateFact: pair.candidateFact,
+          applied: true,
+          note: "memória existente já revogada no mesmo lote",
+        });
+        continue;
+      }
+
+      try {
+        if (action === "reinforce") {
+          this.db.reinforceMemory(existing);
+          outcomes.push({
+            action,
+            scope: pair.scope,
+            existingId: pair.existingId,
+            existingFact: existing.fact,
+            candidateFact: pair.candidateFact,
+            applied: true,
+          });
+          continue;
+        }
+
+        if (action === "supersede") {
+          const newId = this.db.supersedeMemory(
+            pair.existingId,
+            pair.candidateFact,
+            pair.candidateCategory,
+            pair.scope
+          );
+          outcomes.push({
+            action,
+            scope: pair.scope,
+            existingId: pair.existingId,
+            existingFact: existing.fact,
+            candidateFact: pair.candidateFact,
+            newId,
+            applied: true,
+          });
+          continue;
+        }
+
+        if (action === "merge") {
+          const mergedFact = mergedFacts.get(pair.index) ?? pair.candidateFact;
+          this.db.mergeMemories(
+            pair.existingId,
+            {
+              fact: pair.candidateFact,
+              category: pair.candidateCategory,
+              scope: pair.scope,
+              score: existing.score,
+              confirmations: existing.confirmations,
+            },
+            mergedFact
+          );
+          outcomes.push({
+            action,
+            scope: pair.scope,
+            existingId: pair.existingId,
+            existingFact: existing.fact,
+            candidateFact: pair.candidateFact,
+            mergedFact,
+            applied: true,
+          });
+          continue;
+        }
+
+        // `independent` (decisão explícita ou par sem decisão válida).
+        if (!isAbsorbed) this.insertReconciledCandidate(pair, insertedCandidates);
+        outcomes.push({
+          action: "independent",
+          scope: pair.scope,
+          existingId: pair.existingId,
+          existingFact: existing.fact,
+          candidateFact: pair.candidateFact,
+          applied: true,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[REM Sleep] Falha ao reconciliar par ${pair.index}: ${message}`);
+        // Falha transacional: o par degrada para `independent` — o fato
+        // candidato entra como memória nova (nada se perde).
+        if (!isAbsorbed) this.insertReconciledCandidate(pair, insertedCandidates);
+        outcomes.push({
+          action: "independent",
+          scope: pair.scope,
+          existingId: pair.existingId,
+          existingFact: existing.fact,
+          candidateFact: pair.candidateFact,
+          applied: true,
+          note: `falha na reconciliação (${message})`,
+        });
+      }
+    }
+
+    return outcomes;
+  }
+
+  /**
+   * Insere o fato candidato como memória nova (ação `independent`).
+   *
+   * A chave `candidateKey` garante inserção ÚNICA: um candidato com vários
+   * pares não vira várias linhas.
+   */
+  private insertReconciledCandidate(
+    pair: ReconciliationPair,
+    inserted: Set<string>
+  ): void {
+    if (inserted.has(pair.candidateKey)) return;
+    inserted.add(pair.candidateKey);
+    this.db.insertMemory(pair.scope, pair.candidateFact, pair.candidateCategory);
+  }
+
   /** Renderiza o DREAMS.md de forma determinística a partir do resultado. */
   private renderDreamsMarkdown(input: {
     source: SynthesisSource;
     synthError: string | null;
     newMemories: SynthesizedMemory[];
     allMemories: MemoryRecord[];
+    reconciliations: ReconciliationOutcome[];
   }): string {
     const lines: string[] = ["# Daily Dreams Synthesis", ""];
     const statusText = input.synthError
@@ -553,6 +832,25 @@ export class SleepCycle {
       lines.push("## Memórias destiladas nesta síntese", "");
       for (const mem of input.newMemories) {
         lines.push(`- [${mem.category.toUpperCase()}] (${mem.scope}) ${mem.fact}`);
+      }
+      lines.push("");
+    }
+
+    // TICKET-DREAMS-06 (Frente B): o relatório reflete as reconciliações
+    // efetuadas (absorções, revogações, fusões e falsos positivos).
+    if (input.reconciliations.length > 0) {
+      lines.push("## Reconciliações cognitivas", "");
+      for (const rec of input.reconciliations) {
+        const target =
+          rec.action === "supersede" && typeof rec.newId === "number"
+            ? `#${rec.existingId} → #${rec.newId}`
+            : `#${rec.existingId}`;
+        const detail =
+          rec.action === "merge" && rec.mergedFact
+            ? ` ⇐ "${rec.mergedFact}"`
+            : ` ← "${rec.candidateFact}"`;
+        const note = rec.note ? ` (${rec.note})` : "";
+        lines.push(`- \`${rec.action}\` — ${rec.scope} — ${target}${detail}${note}`);
       }
       lines.push("");
     }

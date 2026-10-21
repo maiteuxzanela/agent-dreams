@@ -415,8 +415,238 @@ export function parseMimoMemories(
 }
 
 // ---------------------------------------------------------------------------
-// Subprocesso `opencode run`
+// TICKET-DREAMS-06 (Frente B) — Classificador neural de reconciliação
 // ---------------------------------------------------------------------------
+
+/**
+ * As 4 ações de reconciliação reconhecidas pelo classificador neural.
+ *
+ * A taxonomia é FECHADA por contrato: qualquer rótulo fora desta lista é
+ * inválido e o par correspondente é descartado (nada é aplicado ao banco).
+ */
+export const RECONCILIATION_ACTIONS = [
+  "reinforce",
+  "supersede",
+  "merge",
+  "independent",
+] as const;
+
+export type ReconciliationAction = (typeof RECONCILIATION_ACTIONS)[number];
+
+/**
+ * Um par de reconciliação: a memória JÁ EXISTENTE no banco e o fato
+ * CANDIDATO destilado da vigília.
+ *
+ * `index` é a chave de correlação da resposta do modelo (o par é sempre do
+ * MESMO escopo — o isolamento entre personas é garantido pelo chamador, que
+ * só monta pares de uma mesma triagem de escopo).
+ */
+export interface ReconciliationPair {
+  /** Índice do par no lote (0-based). */
+  index: number;
+  /** Id da memória já existente no banco. */
+  existingId: number;
+  scope: string;
+  existingFact: string;
+  candidateFact: string;
+  candidateCategory: MemoryCategory;
+  /** Agrupa os pares que envolvem o MESMO fato candidato (chave estável). */
+  candidateKey: string;
+}
+
+/** Decisão do classificador para um par. */
+export interface ReconciliationDecision {
+  action: ReconciliationAction;
+  pairIndex: number;
+  existingId: number;
+  /** Texto unificado — presente apenas na ação `merge`. */
+  mergedFact?: string;
+}
+
+/** Resultado do julgamento neural em lote. */
+export interface ReconciliationBatchResult {
+  /** Decisões válidas (um por par, no máximo). */
+  decisions: ReconciliationDecision[];
+  /** Pares ignorados por JSON malformado, rótulo inválido ou `merged_fact` ausente. */
+  dropped: number;
+  /** Houve JSON parseável na resposta do modelo? */
+  parsed: boolean;
+  /** Origem do julgamento (`none` no fallback determinístico). */
+  source: SynthesisSource;
+  /** Causa da degradação para o fallback determinístico (null em operação normal). */
+  error: string | null;
+  promptChars: number;
+  promptBytes: number;
+  modelUsed: string;
+}
+
+/** Normaliza o rótulo da ação; devolve null para qualquer valor fora da taxonomia. */
+function normalizeReconciliationAction(raw: unknown): ReconciliationAction | null {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim().toLowerCase();
+  for (const action of RECONCILIATION_ACTIONS) {
+    if (action === value) return action;
+  }
+  return null;
+}
+
+/**
+ * Monta o prompt de JULGAMENTO DE RECONCILIAÇÃO.
+ *
+ * O modelo recebe os pares (existente x candidata) e devolve UM item por par
+ * com exatamente uma das 4 ações. Em `merge` ele obrigatoriamente produz o
+ * `merged_fact` — a síntese concisa e densa que次第rá o banco.
+ *
+ * HARDENING (TICKET-DREAMS-04B): os fatos são redigidos por `redactSecrets`
+ * antes de entrar no prompt — nenhuma credencial (o texto da candidata pode
+ * vir freshly destilado do diálogo) é enviada ao modelo externo. A redação é
+ * idempotente, então reaplicá-la é inócuo.
+ */
+export function buildReconciliationPrompt(pairs: ReconciliationPair[]): string {
+  const lines: string[] = [];
+  lines.push("Você é o Reconciliador Cognitivo do ecossistema OpenCode.");
+  lines.push("Classifique cada par (memória existente x memória candidata) em EXATAMENTE uma das 4 ações.");
+  lines.push("");
+  lines.push("AÇÕES (taxonomia fechada — escolha exatamente uma):");
+  lines.push(
+    '- "reinforce": a candidata é uma PARÁFRASE da diretriz existente (mesma regra, outras palavras). A existente é absorvida e reforçada.'
+  );
+  lines.push(
+    '- "supersede": a candidata REVOGA explicitamente a diretriz existente (a nova regra substitui a antiga, que deixa de valer).'
+  );
+  lines.push(
+    '- "merge": a candidata COMPLEMENTA a existente (mesmo tema, informação adicional). Produza "merged_fact": a síntese concisa e densa dos dois fatos.'
+  );
+  lines.push(
+    '- "independent": falso positivo de vocabulário — os dois fatos são distintos. Ambos permanecem independentes.'
+  );
+  lines.push("");
+  lines.push("REGRAS ABSOLUTAS:");
+  lines.push(
+    "1. Responda EXCLUSIVAMENTE com um array JSON válido. Nada antes, nada depois. Sem cercas markdown, sem comentários."
+  );
+  lines.push(
+    '2. Formato exato de cada item: {"pair": <índice do par>, "action": "<ação>"}. Em "merge" acrescente "merged_fact": "<texto único>".'
+  );
+  lines.push("3. Responda UM item por par, usando o índice do par. Não invente índices.");
+  lines.push('4. "merged_fact" é OBRIGATÓRIO em "merge" e PROIBIDO nas demais ações.');
+  lines.push(
+    "5. Em caso de dúvida entre reinforce e merge, escolha merge APENAS se a candidata acrescenta informação que a existente não tem."
+  );
+  lines.push("6. PROIBIDO inventar fatos que não estejam no par.");
+  lines.push("");
+  lines.push("<pares>");
+  for (const pair of pairs) {
+    lines.push(`[par ${pair.index}] escopo=${pair.scope}`);
+    lines.push(`existente: ${redactSecrets(pair.existingFact)}`);
+    lines.push(`candidata: ${redactSecrets(pair.candidateFact)}`);
+    lines.push("");
+  }
+  lines.push("</pares>");
+  lines.push("");
+  lines.push("Lembrete: sua ÚNICA saída é o array JSON.");
+  return lines.join("\n");
+}
+
+/**
+ * Converte a saída bruta do modelo em decisões de reconciliação VALIDADAS.
+ *
+ * Resiliência (contrato do ticket): pares malformados ou inválidos são
+ * IGNORADOS (contados em `dropped`) — nunca Applied ao banco. Um par sem
+ * decisão válida é tratado pelo despachante como `independent` (o fato
+ * candidato é inserido como memória nova), o que garante que NENHUMA memória
+ * destilada se perca por uma resposta ruim do modelo.
+ */
+export function parseReconciliationDecisions(
+  raw: string,
+  pairs: ReconciliationPair[]
+): { decisions: ReconciliationDecision[]; dropped: number; parsed: boolean } {
+  const candidates = tryParseJsonArrays(stripAnsi(raw ?? ""));
+  if (candidates === null) {
+    return { decisions: [], dropped: 0, parsed: false };
+  }
+
+  const byIndex = new Map<number, ReconciliationPair>();
+  for (const pair of pairs) byIndex.set(pair.index, pair);
+
+  const decisions: ReconciliationDecision[] = [];
+  const decided = new Set<number>();
+  let dropped = 0;
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      dropped++;
+      continue;
+    }
+    const item = candidate as Record<string, unknown>;
+
+    // Correlação com o par: aceita "pair" (índice) ou "existing_id".
+    let pair: ReconciliationPair | undefined;
+    const rawPair = item.pair;
+    if (typeof rawPair === "number" && Number.isInteger(rawPair)) {
+      pair = byIndex.get(rawPair);
+    } else if (typeof rawPair === "string" && /^\d+$/.test(rawPair.trim())) {
+      pair = byIndex.get(Number(rawPair.trim()));
+    }
+    if (!pair && typeof item.existing_id === "number") {
+      pair = pairs.find((p) => p.existingId === item.existing_id);
+    }
+    if (!pair) {
+      dropped++; // par inexistente ou índice fora do lote
+      continue;
+    }
+    if (decided.has(pair.index)) {
+      dropped++; // decisão duplicada para o mesmo par
+      continue;
+    }
+
+    const action = normalizeReconciliationAction(item.action);
+    if (!action) {
+      dropped++; // rótulo fora da taxonomia
+      continue;
+    }
+
+    if (action === "merge") {
+      const mergedFact =
+        typeof item.merged_fact === "string"
+          ? redactSecrets(item.merged_fact).replace(/\s+/g, " ").trim()
+          : "";
+      if (mergedFact.length < 10) {
+        dropped++; // merge sem texto unificado utilizável
+        continue;
+      }
+      decided.add(pair.index);
+      decisions.push({
+        action,
+        pairIndex: pair.index,
+        existingId: pair.existingId,
+        mergedFact,
+      });
+      continue;
+    }
+
+    decided.add(pair.index);
+    decisions.push({ action, pairIndex: pair.index, existingId: pair.existingId });
+  }
+
+  return { decisions, dropped, parsed: true };
+}
+
+/**
+ * Fallback DETERMÍSTICO: todos os candidatos são tratados como `independent`.
+ *
+ * Usado quando a IA está indisponível ou `DREAMS_OFFLINE=1`. Nenhuma memória
+ * é absorvida, revogada ou fundida — os dois lados permanecem independentes e
+ * o sono REM NÃO é interrompido.
+ */
+export function independentFallbackDecisions(pairs: ReconciliationPair[]): ReconciliationDecision[] {
+  return pairs.map((pair) => ({
+    action: "independent" as ReconciliationAction,
+    pairIndex: pair.index,
+    existingId: pair.existingId,
+  }));
+}
+
 
 interface SpawnOutcome {
   code: number | null;
@@ -603,6 +833,176 @@ export class MimoSynthesizer {
   }
 
   /**
+   * Cascata de modelos a tentar, na ordem de preferência.
+   *
+   * Compartilhada pela síntese de memórias e pelo julgamento de reconciliação:
+   * a política de fallback é a mesma nos dois caminhos.
+   */
+  private modelChain(): string[] {
+    if (this.models.length > 0) return this.models;
+    return Array.from(
+      new Set([this.model, this.fallbackModel, this.tertiaryModel].filter(Boolean))
+    );
+  }
+
+  /**
+   * Monta o prompt de reconciliação respeitando o teto de BYTES UTF-8.
+   *
+   * Pares que não cabem são EXCLUÍDOS do lote enviado ao modelo — eles ficam
+   * sem decisão e, portanto, são tratados como `independent` pelo despachante
+   * (nenhuma memória se perde).
+   */
+  private buildCappedReconciliationPrompt(
+    pairs: ReconciliationPair[]
+  ): { prompt: string; included: ReconciliationPair[] } {
+    let included = pairs;
+    let prompt = buildReconciliationPrompt(included);
+    while (utf8ByteLength(prompt) > this.maxPromptBytes && included.length > 1) {
+      included = included.slice(0, included.length - 1);
+      prompt = buildReconciliationPrompt(included);
+    }
+    return { prompt, included };
+  }
+
+  /**
+   * TICKET-DREAMS-06 (Frente B) — Julgamento neural de reconciliação em LOTE.
+   *
+   * Diferença crucial para o `synthesize()`: este método NUNCA lança. Na
+   * indisponibilidade de IA (ou com `DREAMS_OFFLINE=1`) ele degrada para o
+   * FALLBACK DETERMÍSTICO — todos os candidatos viram `independent` — para
+   * que o Sono REM nunca seja interrompido por uma falha de modelo.
+   */
+  async reconcile(pairs: ReconciliationPair[]): Promise<ReconciliationBatchResult> {
+    const empty: ReconciliationBatchResult = {
+      decisions: [],
+      dropped: 0,
+      parsed: false,
+      source: "none",
+      error: null,
+      promptChars: 0,
+      promptBytes: 0,
+      modelUsed: "none",
+    };
+
+    if (pairs.length === 0) return empty;
+
+    // Fallback determinístico imediato: modo offline.
+    if (process.env.DREAMS_OFFLINE === "1") {
+      return {
+        ...empty,
+        decisions: independentFallbackDecisions(pairs),
+        error: "DREAMS_OFFLINE=1 — julgamento neural indisponível; fallback determinístico (independent).",
+      };
+    }
+
+    const { prompt, included } = this.buildCappedReconciliationPrompt(pairs);
+    if (included.length === 0) {
+      return {
+        ...empty,
+        decisions: independentFallbackDecisions(pairs),
+        error: "prompt de reconciliação acima do teto de bytes; fallback determinístico (independent).",
+      };
+    }
+
+    const promptBytes = utf8ByteLength(prompt);
+    const attemptErrors: string[] = [];
+
+    for (const currentModel of this.modelChain()) {
+      const argv = [
+        this.binary,
+        "run",
+        "--title",
+        "Dreams Reconciliation",
+        "--dir",
+        "/tmp",
+        "--model",
+        currentModel,
+      ];
+
+      let outcome: SpawnOutcome;
+      try {
+        outcome = await runOpencode(argv, {
+          timeoutMs: this.timeoutMs,
+          cwd: this.cwd,
+          stdin: prompt,
+        });
+      } catch (error) {
+        const msg = `falha ao spawnar ${this.binary} para ${currentModel}: ${String(error)}`;
+        this.onError?.(error);
+        attemptErrors.push(msg);
+        continue;
+      }
+
+      if (outcome.spawnError) {
+        const msg = `binário ${this.binary} indisponível para ${currentModel}: ${outcome.spawnError.message}`;
+        this.onError?.(outcome.spawnError);
+        attemptErrors.push(msg);
+        continue;
+      }
+
+      if (outcome.timedOut) {
+        attemptErrors.push(`timeout de ${this.timeoutMs}ms atingido para ${currentModel}`);
+        continue;
+      }
+
+      if (outcome.code !== 0) {
+        attemptErrors.push(
+          `modelo ${currentModel} falhou com code=${outcome.code} signal=${outcome.signal}: ${outcome.stderr.slice(-300).trim()}`
+        );
+        continue;
+      }
+
+      const { decisions, dropped, parsed } = parseReconciliationDecisions(
+        outcome.stdout,
+        included
+      );
+
+      if (parsed) {
+        const sourceLabel = currentModel.includes("mimo")
+          ? "mimo"
+          : currentModel.includes("gemini")
+          ? "gemini"
+          : currentModel;
+        // Pares que não couberam no lote ficam sem decisão ⇒ `independent`.
+        const decided = new Set(decisions.map((d) => d.pairIndex));
+        for (const pair of pairs) {
+          if (!decided.has(pair.index)) {
+            decisions.push({
+              action: "independent",
+              pairIndex: pair.index,
+              existingId: pair.existingId,
+            });
+          }
+        }
+        return {
+          decisions,
+          dropped: dropped + (pairs.length - included.length),
+          parsed: true,
+          source: sourceLabel,
+          error: null,
+          promptChars: prompt.length,
+          promptBytes,
+          modelUsed: currentModel,
+        };
+      }
+
+      attemptErrors.push(
+        `modelo ${currentModel} não retornou JSON de reconciliação parseável (stdout: ${outcome.stdout.slice(0, 200).trim()})`
+      );
+    }
+
+    // Nenhum modelo entregou JSON utilizável ⇒ fallback determinístico.
+    const error = `Julgamento neural de reconciliação indisponível. Tentativas: ${attemptErrors.join(" | ")}`;
+    this.onError?.(new Error(error));
+    return {
+      ...empty,
+      decisions: independentFallbackDecisions(pairs),
+      error,
+      dropped: pairs.length,
+    };
+  }
+
+  /**
    * Executa a destilação cognitiva com cascata de modelos.
    * Lança erro explícito se nenhum modelo estiver disponível / responder com JSON válido.
    */
@@ -633,14 +1033,7 @@ export class MimoSynthesizer {
     // TICKET-DREAMS-01A: duplo teto (chars + bytes UTF-8 reais).
     const prompt = this.buildCappedPrompt(source);
 
-    const modelsToTry: string[] =
-      this.models.length > 0
-        ? this.models
-        : Array.from(
-            new Set(
-              [this.model, this.fallbackModel, this.tertiaryModel].filter(Boolean)
-            )
-          );
+    const modelsToTry: string[] = this.modelChain();
 
     const attemptErrors: string[] = [];
 
@@ -736,4 +1129,18 @@ export async function synthesizeMemories(
   options?: MimoSynthesizerOptions
 ): Promise<SynthesisResult> {
   return new MimoSynthesizer(options).synthesize(dialogue);
+}
+
+/**
+ * TICKET-DREAMS-06 (Frente B) — Atalho funcional do julgamento neural em
+ * LOTE: `await reconcileMemoriesBatch(pairs)`.
+ *
+ * NUNCA lança: na indisponibilidade de IA (ou com `DREAMS_OFFLINE=1`) devolve
+ * o fallback determinístico (todos os candidatos como `independent`).
+ */
+export async function reconcileMemoriesBatch(
+  pairs: ReconciliationPair[],
+  options?: MimoSynthesizerOptions
+): Promise<ReconciliationBatchResult> {
+  return new MimoSynthesizer(options).reconcile(pairs);
 }

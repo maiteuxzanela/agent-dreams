@@ -433,8 +433,21 @@ describe("DREAMS-08A — remSleep processa cada chunk sequencialmente", () => {
       const expectedChunks = chunkDialogueText(dialogue).length;
       expect(expectedChunks).toBeGreaterThanOrEqual(2);
 
-      // Cada chunk = exatamente uma invocação (o modelo primário responde OK).
-      expect(rec.count()).toBe(expectedChunks);
+      // Cada chunk = exatamente uma invocação de SÍNTESE (o modelo primário
+      // responde OK) — nenhum chunk é sintetizado duas vezes.
+      //
+      // TICKET-DREAMS-06 (Frente B): o Sono REM passou a fazer UMA invocação
+      // EXTRA — o julgamento neural de reconciliação em LOTE — quando a
+      // triagem léxica (Jaccard >= 15%) encontrou candidatos. Essa invocação é
+      // o LOTE de reconciliação, jamais um chunk reaproveitado.
+      const totalInvocations = rec.count();
+      expect(totalInvocations).toBeGreaterThanOrEqual(expectedChunks);
+      expect(totalInvocations).toBeLessThanOrEqual(expectedChunks + 1);
+      if (totalInvocations > expectedChunks) {
+        const extraStdin = fs.readFileSync(rec.stdinLog(expectedChunks + 1), "utf-8");
+        expect(extraStdin).toContain("Reconciliador Cognitivo");
+        expect(extraStdin).not.toContain("MANHA_INICIO");
+      }
 
       // Conteúdo cronológico chegou ao transporte, sem omissão do início do dia.
       const stdins: string[] = [];

@@ -382,7 +382,7 @@ export interface StartServerOptions extends CreateServerOptions {
  * Conecta o servidor ao transporte stdio (entrada universal MCP).
  *
  * Retorna as referências vivas para que o chamador (CLI/bin ou teste) possa
- * encerrar de forma limpa. Em `bin/dreams-mcp.js`, sinais SIGINT/SIGTERM
+ * encerrar de forma limpa. Em `bin/agent-dreams.js`, sinais SIGINT/SIGTERM
  * fecham o servidor antes de sair.
  */
 export async function startServer(options: StartServerOptions = {}): Promise<{

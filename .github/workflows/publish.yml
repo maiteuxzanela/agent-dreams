@@ -1,41 +1,113 @@
 name: Publish to NPM
 
+# TICKET-DREAMS-05 — publicação com proveniência criptográfica.
+#
+# O gatilho continua sendo a publicação de uma release (ou disparo manual),
+# mas a esteira passa a:
+#   * travar a versão do Bun (nunca `latest`) — build reprodutível;
+#   * rodar a suíte determinística em modo OFFLINE (`DREAMS_OFFLINE=1`),
+#     sem qualquer chamada a provedor de IA externo durante o release;
+#   * conferir a coerência entre a tag da release e a versão do package.json;
+#   * publicar com `--provenance`, gerando o atestado verificável no registry
+#     (a permissão `id-token: write` abaixo é o que habilita o OIDC).
 on:
   release:
     types: [published]
   workflow_dispatch:
 
+env:
+  # Mesma versão travada usada no workflow de CI (fonte única da verdade).
+  BUN_VERSION: "1.4.2"
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
+      # Necessário para o npm gerar o atestado de proveniência (OIDC).
       id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Bun
+      - name: Setup Bun (versão travada)
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ env.BUN_VERSION }}
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - name: Cache do diretório de downloads do Bun
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
 
-      - name: Run Typecheck
-        run: bun run typecheck
-
-      - name: Run Deterministic Tests
-        run: bun test
-
-      - name: Setup Node for NPM Publish
+      - name: Setup Node (runtime do npm publish e da guarda de integridade)
         uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Install dependencies (lockfile congelado)
+        run: bun install --frozen-lockfile
+
+      - name: Run Typecheck
+        run: bun run typecheck
+
+      - name: Run Deterministic Tests (modo offline)
+        run: DREAMS_OFFLINE=1 bun test
+        env:
+          DREAMS_OFFLINE: "1"
+
+      - name: Validar empacotamento (guarda de integridade do tarball)
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > pack-manifest.json
+          node -e '
+            const fs = require("node:fs");
+            const manifest = JSON.parse(fs.readFileSync("pack-manifest.json", "utf8"));
+            const files = manifest[0].files.map((f) => f.path);
+            // Guarda de integridade do conteúdo publicado: testes, fixtures,
+            // workflows de CI e artefatos de runtime local nunca podem vazar
+            // para o tarball do registry.
+            const forbidden = files.filter((p) =>
+              p.startsWith("tests/") ||
+              p.startsWith(".github/") ||
+              p.startsWith(".test-scratch/") ||
+              p.endsWith(".log") ||
+              p.endsWith(".db") ||
+              p.endsWith(".db-wal") ||
+              p.endsWith(".db-shm")
+            );
+            if (forbidden.length > 0) {
+              console.error("::error::Artefatos indevidos no pacote publicado:");
+              for (const f of forbidden) console.error("  - " + f);
+              process.exit(1);
+            }
+            if (files.length === 0) {
+              console.error("::error::O tarball saiu vazio — nada seria publicado.");
+              process.exit(1);
+            }
+            console.log("OK: " + files.length + " arquivos no pacote, sem artefatos de teste/CI.");
+          '
+
+      - name: Verificar coerência da versão (tag vs package.json)
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
+            if [ "$TAG" != "$PKG_VERSION" ]; then
+              echo "::error::Tag da release ($GITHUB_REF_NAME => $TAG) difere da versão declarada no package.json ($PKG_VERSION)."
+              exit 1
+            fi
+            echo "Versão coerente com a release: $PKG_VERSION"
+          else
+            echo "::notice::Tag '$GITHUB_REF_NAME' não é semver puro — verificação de versão ignorada."
+          fi
+
       - name: Publish to NPM
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,10 +1,10 @@
 #!/bin/bash
-# Wrapper para o consolidador diário de memórias (opencode-plugin-dreams)
-# Garantias de execução: Checagem de conectividade ISOLADA para a LLM remota,
+# Wrapper para o consolidador diário de memórias (agent-dreams)
+# Garantias de execução: healthcheck de rede HTTP isolado para a LLM remota,
 # proteção de hardware, alerta em falha/adiamento e logging isolado com rotação.
 #
 # DEF-07: Light Sleep e Deep Sleep são rotinas 100% locais e rodam SEMPRE,
-# mesmo sem internet. A verificação de ping só decide se a chamada remota da
+# mesmo sem internet. O healthcheck de rede só decide se a chamada remota da
 # LLM no REM Sleep roda online ou em modo offline local (DREAMS_OFFLINE=1).
 #
 # C5 (TICKET-DREAMS-02): o CLI devolve códigos de saída semânticos; o wrapper
@@ -20,9 +20,9 @@
 #
 # TICKET-DREAMS-02: o lockfile deixa de ser um caminho fixo e passa a ser
 # RESOLVIDO DINAMICAMENTE na ordem `DREAMS_LOCK_FILE` →
-# `${XDG_RUNTIME_DIR:-/run/user/<uid>}/opencode-dreams.lock` (só se o diretório
-# existir e for gravável) → `/tmp/opencode-dreams-<uid>.lock` (fallback seguro,
-# por-UID) → `$HOME/.local/state/opencode-dreams.lock` (degrade). Detalhes e
+# `${XDG_RUNTIME_DIR:-/run/user/<uid>}/agent-dreams.lock` (só se o diretório
+# existir e for gravável) → `/tmp/agent-dreams-<uid>.lock` (fallback seguro,
+# por-UID) → `$HOME/.local/state/agent-dreams.lock` (degrade). Detalhes e
 # proteção contra symlink/ownership/hard-link em `resolve_lock_file`.
 #
 # BLINDAGEM DO LOCKFILE (Portão 2 — decisão (B) MITIGAR):
@@ -70,11 +70,37 @@
 #     barreira contra alias é a PÓS-abertura (R3), não a preventiva — sem
 #     dano, porque a abertura é read-only.
 #
+# TICKET-DREAMS-03 (portabilidade): ZERO caminhos absolutos da máquina da autora.
+#   * O diretório do plugin é resolvido DINAMICAMENTE a partir da localização do
+#     próprio script (`dirname "$(readlink -f "$0")"`); o CLI é o `src/cli.ts`
+#     irmão do diretório `bin/` onde este wrapper vive. Nada é fixado no `$HOME`
+#     de um usuário específico — funciona em qualquer clone/instalação.
+#   * Caminhos de estado/config respeitam XDG ($XDG_STATE_HOME, $XDG_RUNTIME_DIR).
+#   * Healthcheck de rede por HTTP (curl → wget), SEM dependência de ICMP/ping.
 
 # Modo defensivo estrito: aborta em erro, variável não definida e falha de pipe.
 set -euo pipefail
 
-LOG_FILE="$HOME/.local/state/opencode-dreams.log"
+# ---------------------------------------------------------------------------
+# 0.0 Resolução dinâmica de caminhos (TICKET-DREAMS-03)
+#     O wrapper vive em <PLUGIN_DIR>/bin/dreams-consolidate.sh, logo o diretório
+#     do plugin é o pai do diretório do script. Overrides explícitos (seams de
+#     teste e instalações atípicas):
+#       DREAMS_PLUGIN_DIR — diretório raiz do plugin
+#       DREAMS_CLI_PATH   — caminho do CLI (default: <PLUGIN_DIR>/src/cli.ts)
+#       DREAMS_LOG_FILE   — log de estado consolidado (default: XDG state dir)
+#       DREAMS_LOCK_FILE  — lock exclusivo global
+# ---------------------------------------------------------------------------
+SELF="${BASH_SOURCE[0]:-$0}"
+if command -v readlink >/dev/null 2>&1 && readlink -f "$SELF" >/dev/null 2>&1; then
+    SELF="$(readlink -f "$SELF")"
+fi
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+PLUGIN_DIR="${DREAMS_PLUGIN_DIR:-$(dirname "$SCRIPT_DIR")}"
+CLI_PATH="${DREAMS_CLI_PATH:-$PLUGIN_DIR/src/cli.ts}"
+
+XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+LOG_FILE="${DREAMS_LOG_FILE:-$XDG_STATE_HOME/agent-dreams.log}"
 LOG_MAX_BYTES=5242880 # 5 MiB — teto antes da rotação para "${LOG_FILE}.1"
 LOCK_FD=""
 DREAMS_TMP=""
@@ -88,14 +114,14 @@ DREAMS_TMP=""
 #      um lock dedicado). SEMPRE tem a maior precedência e não passa pela
 #      validação de ownership — é uma decisão consciente, não um default.
 #
-#   2. ${XDG_RUNTIME_DIR:-/run/user/<uid>}/opencode-dreams.lock
+#   2. ${XDG_RUNTIME_DIR:-/run/user/<uid>}/agent-dreams.lock
 #      Diretório de runtime do usuário (criado pelo systemd/PAM com modo 0700):
 #      nenhum outro usuário pode listar, ler ou PRÉ-PLANTAR (symlink) o lock.
 #      Só é usado se o diretório EXISTIR e for GRAVÁVEL.
 #
-#   3. /tmp/opencode-dreams-<uid>.lock
+#   3. /tmp/agent-dreams-<uid>.lock
 #      Fallback para quando não há runtime dir utilizável. O nome é POR-UID:
-#      nunca o caminho compartilhado `/tmp/opencode-dreams.lock`, que permitiria
+#      nunca o caminho compartilhado `/tmp/agent-dreams.lock`, que permitiria
 #      a um atacante local pré-plantar um symlink e sequestrar a escrita.
 #
 # TIER 3.5 — Proteção contra sequestro do lockfile (Zero Trust):
@@ -250,14 +276,14 @@ resolve_lock_file() {
     # (advisory: sem checagem de symlink — só o dono planta lá).
     xdg="${XDG_RUNTIME_DIR:-/run/user/${uid}}"
     if [ -d "$xdg" ] && [ -w "$xdg" ]; then
-        candidate="${xdg}/opencode-dreams.lock"
+        candidate="${xdg}/agent-dreams.lock"
         claim_lock_path "$candidate" || true
         printf '%s' "$candidate"
         return 0
     fi
 
     # TIER 3 — fallback em /tmp, nome por-UID.
-    candidate="/tmp/opencode-dreams-${uid}.lock"
+    candidate="/tmp/agent-dreams-${uid}.lock"
     if acquire_lock_candidate "$candidate"; then
         printf '%s' "$candidate"
         return 0
@@ -268,7 +294,7 @@ resolve_lock_file() {
     # próprio usuário em vez de usar um alvo hostil. O PRÓPRIO destino do
     # degrade também é validado; se o home privado for hostil, o script ABORTA
     # (fail-closed) em vez de seguir o link.
-    candidate="$HOME/.local/state/opencode-dreams.lock"
+    candidate="$HOME/.local/state/agent-dreams.lock"
     if acquire_lock_candidate "$candidate"; then
         printf '%s' "$candidate"
         return 0
@@ -301,11 +327,6 @@ mkdir -p "$(dirname "$LOG_FILE")"
 if ! LOCK_FILE="$(resolve_lock_file)"; then
     LOCK_FILE=""
 fi
-
-# Path do CLI a ser executado (precisa existir antes da rotação delegada abaixo).
-PLUGIN_DIR="$HOME/.config/opencode/plugins/opencode-plugin-dreams"
-CLI_PATH="$PLUGIN_DIR/src/cli.ts"
-
 export PATH="$HOME/.opencode/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 # 0. Trap de limpeza (TICKET-DREAMS-05 / Frente 5B): fecha o descritor do lock
@@ -389,7 +410,7 @@ fi
 
 exec >> "$LOG_FILE" 2>&1
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Iniciando consolidação diária de memórias (opencode-dreams)..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Iniciando consolidação diária de memórias (agent-dreams)..."
 if [ -n "$LOCK_FD" ]; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Lock exclusivo adquirido ($LOCK_FILE, fd=$LOCK_FD)."
 fi
@@ -399,15 +420,40 @@ if [ ! -f "$CLI_PATH" ]; then
     exit 1
 fi
 
-# 1. Checagem de conectividade com tolerância de boot (até 60s resilientes)
-# Loop de até 20 tentativas com sleep 3s testando 1.1.1.1 e fallback para 8.8.8.8.
-# Garante tempo para negociação DHCP/rede no boot sem travar o ciclo local.
+# 1. Healthcheck de conectividade com tolerância de boot (até 60s resilientes).
+#    TICKET-DREAMS-03: substitui o antigo `ping -c 1` ICMP por uma sonda HTTP
+#    (curl → wget) contra endpoints HTTPS com timeout curto. Não depende de
+#    pacotes/rotas ICMP (que redes corporativas costumam bloquear) nem vaza
+#    telemetria ICMP. O fallback de host (1.1.1.1 → 8.8.8.8) é preservado.
+probe_online() {
+    local url
+    local have_client=0
+    for url in "https://1.1.1.1" "https://8.8.8.8"; do
+        if command -v curl >/dev/null 2>&1; then
+            have_client=1
+            curl --silent --show-error --output /dev/null --max-time 3 "$url" >/dev/null 2>&1 && return 0
+        fi
+        if command -v wget >/dev/null 2>&1; then
+            have_client=1
+            wget --quiet --timeout=3 --tries=1 --spider "$url" >/dev/null 2>&1 && return 0
+        fi
+    done
+    # Nenhum cliente HTTP disponível: impossível provar offline — fail-open para
+    # que o próprio REM Sleep decida com EX_TEMPFAIL (75) se a IA for inalcançável.
+    if [ "$have_client" -eq 0 ]; then
+        return 0
+    fi
+    return 1
+}
+
 ONLINE=0
-MAX_ATTEMPTS=20
-RETRY_DELAY=3
+# Orçamento de tolerância de boot. Ajustável via env (seam operacional e de
+# teste): padrão = 20 tentativas × 3s ≈ 60s de tolerância para DHCP/link.
+MAX_ATTEMPTS="${DREAMS_NET_MAX_ATTEMPTS:-20}"
+RETRY_DELAY="${DREAMS_NET_RETRY_DELAY:-3}"
 
 for attempt in $(seq 1 $MAX_ATTEMPTS); do
-    if ping -c 1 -W 2 1.1.1.1 > /dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+    if probe_online; then
         ONLINE=1
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Conectividade OK na tentativa $attempt/$MAX_ATTEMPTS. Prosseguindo..."
         break
@@ -478,7 +524,7 @@ alert_user() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ALERTA: $msg"
     # Best-effort: notifica a sessão gráfica quando disponível; nunca falha o ciclo.
     if command -v notify-send >/dev/null 2>&1; then
-        notify-send -u normal "OpenCode Dreams" "$msg" 2>/dev/null || true
+        notify-send -u normal "Agent Dreams" "$msg" 2>/dev/null || true
     fi
 }
 

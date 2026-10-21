@@ -219,13 +219,13 @@ function makeSandbox(): Sandbox {
   return {
     home,
     runtimeDir,
-    log: path.join(home, ".local", "state", "opencode-dreams.log"),
+    log: path.join(home, ".local", "state", "agent-dreams.log"),
   };
 }
 
 /** Lê o log do wrapper (o "Lockfile resolvido" é gravado antes do redirect). */
 function readLog(home: string): string {
-  const logPath = path.join(home, ".local", "state", "opencode-dreams.log");
+  const logPath = path.join(home, ".local", "state", "agent-dreams.log");
   return fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
 }
 
@@ -238,12 +238,14 @@ function runScript(
   home: string,
   env: Record<string, string | undefined>
 ): { status: number; log: string } {
+  const missingCli = path.join(home, "inexistente", "cli.ts");
   const result = Bun.spawnSync(["bash", SCRIPT], {
     cwd: REPO_ROOT,
     env: {
       PATH: `${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
       HOME: home,
       DREAMS_OFFLINE: "1",
+      DREAMS_CLI_PATH: missingCli,
       ...env,
     },
     stdout: "pipe",
@@ -338,11 +340,11 @@ describe("[DREAMS-02/3] bin/dreams-consolidate.sh: isolamento do lockfile", () =
     const { status, log } = runScript(sandbox.home, { XDG_RUNTIME_DIR: sandbox.runtimeDir });
 
     expect(status).toBe(1);
-    const expected = path.join(sandbox.runtimeDir, "opencode-dreams.lock");
+    const expected = path.join(sandbox.runtimeDir, "agent-dreams.lock");
     expect(log).toContain(`Lockfile resolvido: ${expected}`);
     expect(fs.existsSync(expected)).toBe(true);
     // O lock NÃO foi plantado no /tmp compartilhado.
-    expect(log).not.toContain("/tmp/opencode-dreams.lock");
+    expect(log).not.toContain("/tmp/agent-dreams.lock");
   });
 
   test("TIER 3: sem runtime dir utilizável ⇒ fallback POR-UID em /tmp (nunca o caminho compartilhado)", () => {
@@ -360,10 +362,10 @@ describe("[DREAMS-02/3] bin/dreams-consolidate.sh: isolamento do lockfile", () =
     });
 
     expect(status).toBe(1);
-    // O fallback é POR-UID: `/tmp/opencode-dreams-<uid>.lock`.
-    expect(log).toContain(`Lockfile resolvido: /tmp/opencode-dreams-${UID}.lock`);
+    // O fallback é POR-UID: `/tmp/agent-dreams-<uid>.lock`.
+    expect(log).toContain(`Lockfile resolvido: /tmp/agent-dreams-${UID}.lock`);
     // E NUNCA o caminho compartilhado (que permitiria sequestro por symlink).
-    expect(log).not.toContain("Lockfile resolvido: /tmp/opencode-dreams.lock\n");
+    expect(log).not.toContain("Lockfile resolvido: /tmp/agent-dreams.lock\n");
   });
 
   test("TIER 3.5: symlink plantado no alvo do /tmp NUNCA é seguido (degrada para o home privado)", () => {
@@ -382,8 +384,8 @@ describe("[DREAMS-02/3] bin/dreams-consolidate.sh: isolamento do lockfile", () =
       env: { XDG_RUNTIME_DIR: missingRuntime },
       // Symlink plantado por um atacante local no caminho de fallback.
       pre: [
-        `ln -sf /tmp/sandbox-home/sentinel.txt /tmp/opencode-dreams-${UID}.lock`,
-        `ls -l /tmp/opencode-dreams-${UID}.lock`,
+        `ln -sf /tmp/sandbox-home/sentinel.txt /tmp/agent-dreams-${UID}.lock`,
+        `ls -l /tmp/agent-dreams-${UID}.lock`,
       ],
     });
 
@@ -391,7 +393,7 @@ describe("[DREAMS-02/3] bin/dreams-consolidate.sh: isolamento do lockfile", () =
     // O symlink NÃO foi seguido: o sentinela está intacto.
     expect(fs.readFileSync(sentinel, "utf8")).toBe("ORIGINAL");
     // O lock degradou para o diretório PRIVADO do próprio usuário.
-    expect(log).toContain("Lockfile resolvido: /tmp/sandbox-home/.local/state/opencode-dreams.lock");
+    expect(log).toContain("Lockfile resolvido: /tmp/sandbox-home/.local/state/agent-dreams.lock");
   });
 
   test("TIER 3.5: symlink DANGLING no alvo do /tmp NUNCA é seguido (o path-arbitrário do atacante NÃO é criado)", () => {
@@ -413,11 +415,11 @@ describe("[DREAMS-02/3] bin/dreams-consolidate.sh: isolamento do lockfile", () =
     const { status, log } = runScriptInSandbox(sandbox, {
       env: { XDG_RUNTIME_DIR: missingRuntime },
       pre: [
-        `ln -sf /tmp/sandbox-home/alvo-do-atacante.txt /tmp/opencode-dreams-${UID}.lock`,
+        `ln -sf /tmp/sandbox-home/alvo-do-atacante.txt /tmp/agent-dreams-${UID}.lock`,
         // Comprovação da pré-condição: o path É symlink e É dangling.
-        `ln -l /tmp/opencode-dreams-${UID}.lock > /tmp/sandbox-home/estado-symlink.txt 2>&1 || true`,
-        `test -L /tmp/opencode-dreams-${UID}.lock && echo "IS-SYMLINK" >> /tmp/sandbox-home/estado-symlink.txt || echo "NOT-SYMLINK" >> /tmp/sandbox-home/estado-symlink.txt`,
-        `test ! -e /tmp/opencode-dreams-${UID}.lock && echo "IS-DANGLING" >> /tmp/sandbox-home/estado-symlink.txt || echo "NOT-DANGLING" >> /tmp/sandbox-home/estado-symlink.txt`,
+        `ln -l /tmp/agent-dreams-${UID}.lock > /tmp/sandbox-home/estado-symlink.txt 2>&1 || true`,
+        `test -L /tmp/agent-dreams-${UID}.lock && echo "IS-SYMLINK" >> /tmp/sandbox-home/estado-symlink.txt || echo "NOT-SYMLINK" >> /tmp/sandbox-home/estado-symlink.txt`,
+        `test ! -e /tmp/agent-dreams-${UID}.lock && echo "IS-DANGLING" >> /tmp/sandbox-home/estado-symlink.txt || echo "NOT-DANGLING" >> /tmp/sandbox-home/estado-symlink.txt`,
       ],
     });
 
@@ -425,7 +427,7 @@ describe("[DREAMS-02/3] bin/dreams-consolidate.sh: isolamento do lockfile", () =
     // (a) O path ARBITRÁRIO escolhido pelo atacante NÃO pode ter sido criado.
     expect(fs.existsSync(attackerTarget)).toBe(false);
     // (b) O lock degradou para o diretório PRIVADO do próprio usuário.
-    expect(log).toContain("Lockfile resolvido: /tmp/sandbox-home/.local/state/opencode-dreams.lock");
+    expect(log).toContain("Lockfile resolvido: /tmp/sandbox-home/.local/state/agent-dreams.lock");
 
     // Prova de que a pré-condição foi mesmo estabelecida (evita verde falso):
     // o path do fallback era um symlink E dangling antes do script rodar.
@@ -451,9 +453,9 @@ describe("[DREAMS-02/3] bin/dreams-consolidate.sh: isolamento do lockfile", () =
       env: { XDG_RUNTIME_DIR: missingRuntime },
       pre: [
         // Os DOIS candidatos são hostis: o do /tmp e o do home privado.
-        `ln -sf /tmp/sandbox-home/alvo-do-atacante.txt /tmp/opencode-dreams-${UID}.lock`,
+        `ln -sf /tmp/sandbox-home/alvo-do-atacante.txt /tmp/agent-dreams-${UID}.lock`,
         `mkdir -p /tmp/sandbox-home/.local/state`,
-        `ln -sf /tmp/sandbox-home/alvo-final.txt /tmp/sandbox-home/.local/state/opencode-dreams.lock`,
+        `ln -sf /tmp/sandbox-home/alvo-final.txt /tmp/sandbox-home/.local/state/agent-dreams.lock`,
       ],
     });
 

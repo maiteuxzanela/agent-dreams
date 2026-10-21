@@ -4,7 +4,7 @@
  * Suíte determinística SDET (Test Engineer) — SEM mocks.
  *
  * O que é exercitado de verdade:
- *   - O binário `bin/dreams-mcp.js` é iniciado como SUBPROCESSO real
+ *   - O binário `bin/agent-dreams.js` é iniciado como SUBPROCESSO real
  *     (`process.execPath` = bun) e fala JSON-RPC via stdio.
  *   - O cliente é o `Client` oficial de `@modelcontextprotocol/sdk`, conectado
  *     por `StdioClientTransport` — o mesmo caminho que Claude Desktop/Cursor
@@ -41,7 +41,6 @@ import { resolveDreamsPaths } from "../src/mcp/server";
 // ---------------------------------------------------------------------------
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
 const MCP_BIN = path.join(REPO_ROOT, "bin", "agent-dreams.js");
-const LEGACY_MCP_BIN = path.join(REPO_ROOT, "bin", "dreams-mcp.js");
 const TEST_BASE = fs.mkdtempSync(path.join(os.tmpdir(), "dreams_mcp_sdet_"));
 const DB_PATH = path.join(TEST_BASE, "dreams.db");
 const DAILY_DIR = path.join(TEST_BASE, "daily");
@@ -593,13 +592,10 @@ describe("HARNESS-45/F1 — resolveDreamsPaths", () => {
     expect(resolved.dailyDir).toBe("/home/sdet/.config/opencode/dreams/daily");
   });
 
-  test("alias legado bin/dreams-mcp.js e novo bin/agent-dreams.js existem e são executáveis", () => {
+  test("binário canônico bin/agent-dreams.js existe e é executável", () => {
     expect(fs.existsSync(MCP_BIN)).toBe(true);
-    expect(fs.existsSync(LEGACY_MCP_BIN)).toBe(true);
     const mcpStat = fs.statSync(MCP_BIN);
-    const legacyStat = fs.statSync(LEGACY_MCP_BIN);
     // Bits de execução presentes
     expect((mcpStat.mode & 0o111) !== 0).toBe(true);
-    expect((legacyStat.mode & 0o111) !== 0).toBe(true);
   });
 });

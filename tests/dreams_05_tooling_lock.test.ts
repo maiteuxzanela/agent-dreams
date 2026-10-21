@@ -127,14 +127,25 @@ describe("[5A] tooling: package.json, lockfile e typecheck offline", () => {
 // ---------------------------------------------------------------------------
 // FRENTE 5B — lock exclusivo + propagação de exit codes
 // ---------------------------------------------------------------------------
-function runScript(home: string, lockFile: string): { status: number; log: string } {
+// TICKET-DREAMS-03: o CLI passou a ser resolvido DINAMICAMENTE a partir da
+// localização do script (`dirname "$(readlink -f "$0")"`), sem depender do
+// `$HOME` de um usuário específico. O override `DREAMS_CLI_PATH` é o seam
+// canônico para simular um CLI genuinamente ausente sem depender do layout
+// de instalação da máquina de teste.
+const MISSING_CLI = "/nonexistent/agent-dreams/src/cli.ts";
+
+function runScript(
+  home: string,
+  lockFile: string,
+  extraEnv: Record<string, string> = {}
+): { status: number; log: string } {
   const r = Bun.spawnSync(["bash", SCRIPT], {
     cwd: REPO_ROOT,
-    env: { ...OFFLINE_ENV, HOME: home, DREAMS_LOCK_FILE: lockFile },
+    env: { ...OFFLINE_ENV, HOME: home, DREAMS_LOCK_FILE: lockFile, ...extraEnv },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const logPath = path.join(home, ".local", "state", "opencode-dreams.log");
+  const logPath = path.join(home, ".local", "state", "agent-dreams.log");
   const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
   return { status: r.exitCode, log };
 }
@@ -174,7 +185,7 @@ describe("[5B] bin/dreams-consolidate.sh: lock exclusivo e exit codes", () => {
     );
     try {
       await waitFor(() => fs.existsSync(ready)); // lock comprovadamente retido
-      const { status, log } = runScript(home, lock);
+      const { status, log } = runScript(home, lock, { DREAMS_CLI_PATH: MISSING_CLI });
 
       expect(status).toBe(0); // skip benigno, nunca erro fatal
       expect(log).toContain("Outra instância de consolidação já está em execução");
@@ -191,19 +202,21 @@ describe("[5B] bin/dreams-consolidate.sh: lock exclusivo e exit codes", () => {
     const home = makeTmp("dreams05_home_"); // HOME sem CLI instalado
     const lock = path.join(makeTmp("dreams05_lock_"), "consolidate.lock");
 
-    const { status, log } = runScript(home, lock);
+    // CLI apontado para um caminho inexistente: a resolução dinâmica do plugin
+    // (TICKET-DREAMS-03) é sobreposta pelo seam explícito DREAMS_CLI_PATH.
+    const { status, log } = runScript(home, lock, { DREAMS_CLI_PATH: MISSING_CLI });
 
     expect(status).toBe(1); // falha fatal (0/75/1 semânticos preservados)
     expect(log).toContain("Lock exclusivo adquirido");
     expect(log).toContain("CLI não encontrado");
-    // Não chegou ao probe de conectividade (checagem de CLI vem antes do ping).
+    // Não chegou ao probe de conectividade (checagem de CLI vem antes da sonda HTTP).
     expect(log).not.toContain("Conectividade OK");
   });
 
   test("o lock é efetivamente liberado após a saída (flock -n volta a vencer)", () => {
     const home = makeTmp("dreams05_home_");
     const lock = path.join(makeTmp("dreams05_lock_"), "consolidate.lock");
-    runScript(home, lock); // adquire e libera no EXIT
+    runScript(home, lock, { DREAMS_CLI_PATH: MISSING_CLI }); // adquire e libera no EXIT
 
     const probe = Bun.spawnSync(["flock", "-n", lock, "true"], {
       env: OFFLINE_ENV,

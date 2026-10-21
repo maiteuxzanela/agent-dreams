@@ -1,0 +1,11 @@
+[Unit]
+Description=Agent Dreams — agendamento diário da consolidação de memórias
+Documentation=https://github.com/maiteuxzanela/agent-dreams#readme
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+Unit=agent-dreams.service
+
+[Install]
+WantedBy=timers.target

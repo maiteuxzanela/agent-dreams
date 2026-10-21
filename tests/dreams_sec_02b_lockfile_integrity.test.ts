@@ -65,18 +65,20 @@ function makeHome(): string {
  * Sem bwrap: o path do lock fica dentro do HOME isolado, observável de fora.
  */
 function runWithExplicitLock(home: string, lockFile: string): { status: number; log: string } {
+  const missingCli = path.join(home, "inexistente", "cli.ts");
   const result = Bun.spawnSync(["bash", SCRIPT], {
     cwd: REPO_ROOT,
     env: {
       PATH: `${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
       HOME: home,
       DREAMS_OFFLINE: "1",
+      DREAMS_CLI_PATH: missingCli,
       DREAMS_LOCK_FILE: lockFile,
     },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const logPath = path.join(home, ".local", "state", "opencode-dreams.log");
+  const logPath = path.join(home, ".local", "state", "agent-dreams.log");
   return {
     status: result.exitCode,
     log: fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "",
@@ -154,7 +156,7 @@ function runInSandbox(options: {
     { stdout: "pipe", stderr: "pipe" }
   );
 
-  const logPath = path.join(options.home, ".local", "state", "opencode-dreams.log");
+  const logPath = path.join(options.home, ".local", "state", "agent-dreams.log");
   const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
   if (result.exitCode !== 0 && log === "") {
     const stderr = new TextDecoder().decode(result.stderr);
@@ -220,10 +222,10 @@ describe("[DREAMS-02/C5] lockfile: rejeição de alias por hard link", () => {
         // `ln` entre filesystems distintos falha com EXDEV e daria um falso
         // "não replicado".
         `printf 'DADOS IMPORTANTES DO USUARIO\\n' > /tmp/vitima.txt`,
-        `ln /tmp/vitima.txt /tmp/opencode-dreams-${UID}.lock`,
+        `ln /tmp/vitima.txt /tmp/agent-dreams-${UID}.lock`,
         // Comprovação da pré-condição: é um hard link (nlink=2) de verdade.
         `stat -c '%h %i' /tmp/vitima.txt > /tmp/sandbox-home/estado.txt`,
-        `stat -c '%h %i' /tmp/opencode-dreams-${UID}.lock >> /tmp/sandbox-home/estado.txt`,
+        `stat -c '%h %i' /tmp/agent-dreams-${UID}.lock >> /tmp/sandbox-home/estado.txt`,
       ],
       post: [
         // Estado da vítima DEPOIS do ciclo, observed de fora via sandbox home.
@@ -241,8 +243,8 @@ describe("[DREAMS-02/C5] lockfile: rejeição de alias por hard link", () => {
     const vitimaPos = fs.readFileSync(path.join(home, "vitima-pos.txt"), "utf8");
     expect(vitimaPos).toBe("CONTEUDO=DADOS IMPORTANTES DO USUARIO\n");
     // O path com alias NÃO foi usado como lockfile: degradou para o privado.
-    expect(log).toContain("Lockfile resolvido: /tmp/sandbox-home/.local/state/opencode-dreams.lock");
-    expect(log).not.toContain(`Lockfile resolvido: /tmp/opencode-dreams-${UID}.lock`);
+    expect(log).toContain("Lockfile resolvido: /tmp/sandbox-home/.local/state/agent-dreams.lock");
+    expect(log).not.toContain(`Lockfile resolvido: /tmp/agent-dreams-${UID}.lock`);
     // E o motivo da degradação é explícito (grep estável).
     expect(log).toContain("motivo=alias-hardlink");
   });
@@ -266,7 +268,7 @@ describe("[DREAMS-02/C5] lockfile: rejeição de alias por hard link", () => {
         // Uma regra relaxada que rejeitasse apenas nlink==2 aceitaria este
         // caso e o path COM ALIAS viraria o lockfile ⇒ a mutação morre aqui.
         `ln /tmp/vitima.txt /tmp/alias1.lock`,
-        `ln /tmp/vitima.txt /tmp/opencode-dreams-${UID}.lock`,
+        `ln /tmp/vitima.txt /tmp/agent-dreams-${UID}.lock`,
         `stat -c '%h' /tmp/vitima.txt > /tmp/sandbox-home/nlink.txt`,
       ],
       post: [`cat /tmp/vitima.txt > /tmp/sandbox-home/vitima-pos.txt`],
@@ -278,8 +280,8 @@ describe("[DREAMS-02/C5] lockfile: rejeição de alias por hard link", () => {
     // A vítima não foi tocada.
     expect(fs.readFileSync(path.join(home, "vitima-pos.txt"), "utf8")).toBe("DADOS IMPORTANTES DO USUARIO\n");
     // O path com alias NÃO foi usado: degradou para o diretório privado.
-    expect(log).toContain("Lockfile resolvido: /tmp/sandbox-home/.local/state/opencode-dreams.lock");
-    expect(log).not.toContain(`Lockfile resolvido: /tmp/opencode-dreams-${UID}.lock`);
+    expect(log).toContain("Lockfile resolvido: /tmp/sandbox-home/.local/state/agent-dreams.lock");
+    expect(log).not.toContain(`Lockfile resolvido: /tmp/agent-dreams-${UID}.lock`);
     expect(log).toContain("motivo=alias-hardlink(nlink=3)");
   });
 });

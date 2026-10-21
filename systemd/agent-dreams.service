@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Dreams — consolidação diária de memórias
+Documentation=https://github.com/maiteuxzanela/agent-dreams#readme
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# __AGENT_DREAMS_DIR__ é substituído dinamicamente por bin/enable-systemd.sh
+# pelo diretório real de instalação do plugin (nenhum caminho do autor).
+WorkingDirectory=__AGENT_DREAMS_DIR__
+ExecStart=__AGENT_DREAMS_DIR__/bin/dreams-consolidate.sh
+# O wrapper já isola a rede (healthcheck HTTP) e faz logging próprio com rotação.
+Environment=DREAMS_NONINTERACTIVE=1
+NoNewPrivileges=true

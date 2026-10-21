@@ -1,0 +1,31 @@
+# Tests and CI — never published
+tests/
+tests/**
+.test-scratch/
+.github/
+
+# Logs, databases and local runtime artifacts
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Temp files and caches
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.cache/
+.tmp/
+.DS_Store
+Thumbs.db
+coverage/
+dist/
+build/
+
+# TypeScript build info
+*.tsbuildinfo

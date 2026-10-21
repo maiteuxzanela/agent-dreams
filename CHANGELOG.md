@@ -17,11 +17,101 @@ nativamente pelo Bun.
 > `1.0.2` **já está ocupado** no registry npm por um *stage build* publicado em
 > 2026-10-19T17:30:52Z (37 arquivos, incluindo a suíte interna `tests/`).
 > O registry não aceita republicação do mesmo identificador: o corte de release do
-> conjunto de mudanças abaixo exige **bump para `1.0.3`** (ou despublicação prévia
-> de `1.0.2`). O `package.json` deste repositório está em `1.0.2` e o workflow de
-> publicação (`publish.yml`) bloqueia releases cujo *tag* não coincida com a versão
-> declarada — o bump deve ser feito de forma coordenada entre `package.json`, *tag*
-> de release e `CHANGELOG.md`.
+> conjunto de mudanças abaixo exigia **bump para `1.0.3`**, que foi aplicado de forma
+> coordenada entre `package.json` (`1.0.3`), *tag* de release (`v1.0.3`) e
+> `CHANGELOG.md` (seção `## [1.0.3]`), conforme a seção de release abaixo.
+> O workflow de publicação (`publish.yml`) bloqueia releases cujo *tag* não coincida
+> com a versão declarada — a release correspondente deve ser publicada com a *tag*
+> `v1.0.3`.
+
+---
+
+## [1.0.3] - 2026-10-21
+
+Corte de release de **refinamento**: preparation final para a publicação no registry
+npm, correção das ressalvas do laudo de *Quality Management* (Portão 2 / Diana) e
+higiene de CI/CD. Nenhuma alteração de schema de dados, de contrato de runtime
+(Bun) ou de comportamento do ciclo cognitivo — as correções são de empacotamento,
+esteira, documentação e permissões de arquivo.
+
+### Bump coordenado para `1.0.3`
+
+- **Alterado** — `package.json`: `"version"` elevada de `1.0.2` para `1.0.3`,
+  em *lockstep* com a *tag* de release (`v1.0.3`) e a seção deste `CHANGELOG.md`.
+- **Alterado** — `src/mcp/server.ts`: `MCP_SERVER_VERSION` passa de `"1.0.0"` para
+  `"1.0.3"`, eliminando a divergência entre a versão anunciada pelo servidor MCP
+  (`initialize` / `serverInfo`) e a versão real do pacote.
+- **Removido** — `"scripts"` da lista `"files"` do `package.json`: o diretório
+  `scripts/` **não existe** no repositório (os executáveis residem em `bin/`), e a
+  entrada gerava ruído no manifesto e alerta de pasta inexistente no empacotamento.
+  A guarda de integridade do tarball (`npm pack --dry-run`) segue exigindo que
+  todo arquivo publicado esteja coberto pelo campo `files`.
+
+### CI/CD — higiene e resiliência
+
+- **Alterado** — `actions/setup-node@v4` passa de `node-version: 20` para
+  `node-version: 22` (Active LTS) em `.github/workflows/ci.yml` e
+  `.github/workflows/publish.yml`, eliminando os alertas de depreciação do runtime
+  Node nos runners `ubuntu-latest` do GitHub Actions.
+- **Adicionado** — **guarda preventiva de fail-fast** no step `Publish to NPM` do
+  `publish.yml`: a publicação é abortada com `::error::` explícito **antes** da
+  invocação do `npm publish` quando o `NODE_AUTH_TOKEN` (secret `NPM_TOKEN`) está
+  ausente ou vazio. Isso transforma a falha genérica
+  `ENEEDAUTH: This command requires you to be logged in to https://registry.npmjs.org/`
+  em um diagnóstico acionável ("configure o secret no repositório"), sem tentar
+  publicar com credencial ausente.
+- **Mantido** — a **guarda de integridade** (que aborta a publicação se o tarball
+  contiver artefatos de teste/CI ou sair vazio) continua rodando em **ambos os
+  caminhos de publicação**: o `ci.yml` (push/PR) e o `publish.yml` (release). O
+  gate de release não depende do `ci.yml`, porque `push.branches` não casa
+  *pushes* de *tag*.
+
+### Documentação — alinhamento com o comportamento real
+
+- **Corrigido** — `README.md`: as seções da arquitetura tri-fásica e da mecânica
+  das fases do sono passaram a descrever o **comportamento real** do REM Sleep —
+  ingestão **integral** em *chunks* sequenciais, que preserva o diálogo **do início
+  ao fim do dia**. As menções a "Buffer seguro de 120.000 chars com truncamento
+  invertido" e ao prefixo `[… início do dia omitido]` foram removidas: o Light
+  Sleep entrega o handoff **completo** (sem descarte do início do dia) e o REM
+  Sleep o particiona em fatias seguras (orçamento de caracteres E de bytes UTF-8),
+  sintetizando **cada** fatia individualmente. O marcador de omissão permanece
+  apenas como rede de segurança interna do sintetizador (nunca emitido no fluxo
+  normal, porque o teto do prompt é respeitado *por chunk*).
+- **Corrigido** — `README.md`: a descrição da fase REM Sleep passa a declarar
+  explicitamente a ingestão particionada e integral, incluindo o critério de
+  adiamento (uma falha em **qualquer** *chunk* adia a consolidação inteira e
+  preserva o *handoff* 100% íntegro no disco).
+
+### Segurança — defesa em profundidade POSIX nos artefatos satélite
+
+- **Alterado** — `src/core/sleep_cycle.ts`: `ensureDirs()` cria os diretórios do
+  ciclo de sono (`dreams/`, `daily/`, `collective/`, `personas/`) com
+  `mode: 0o700` (somente o dono entra). Diretórios **pré-existentes** também são
+  re-endurecidos por `chmod` *best-effort* — o `mode` de criação só valeria para
+  diretórios novos.
+- **Alterado** — `src/core/sleep_cycle.ts`: `writeFileAtomicSync()` passa a criar
+  as projeções de memória (`COLLECTIVE_MEMORY.md` e `personas/<agente>.md`) com
+  `0o600` (antes `0o644`), com `chmod` pós-rename para cobrir artefatos herdados.
+- **Alterado** — `src/core/sleep_cycle.ts`: o handoff `dialogue_pending.txt` e o
+  `dialogue_checkpoint.json` nascem `0o600` — contêm o diálogo bruto do dia e o
+  estado de fronteira da captura, e não devem ser legíveis por outros usuários
+  da máquina.
+- **Alterado** — `src/tools.ts` e `src/mcp/server.ts`: o JSONL diário
+  (`daily/log_<data>.jsonl`), fonte de verdade durável do aprendizado da vigília,
+  nasce `0o600` em diretório `0o700` — tanto pela tool `dream_learn` do plugin
+  quanto pelo `dream_learn` do servidor MCP, que escrevem o **mesmo** arquivo.
+- **Mantido** — o `DreamsDB` continua impondo `0o700` no diretório do banco e
+  `0o600` em `dreams.db`, `dreams.db-wal` e `dreams.db-shm`. As permissões dos
+  artefatos satélite passam a ser **uniformes** com as do banco: a memória do
+  agente não é exposta a outros usuários locais em nenhuma das suas camadas.
+
+### Higiene do repositório
+
+- **Adicionado** — `.gitignore`: `kanban.json` e `opencode.json` passam a ser
+  ignorados explicitamente. São metadados **locais de máquina** (quadro de
+  tarefas e configuração do OpenCode), não artefatos do pacote — sem estas
+  entradas, um `git add .` acidental os versionaria no repositório público.
 
 ---
 

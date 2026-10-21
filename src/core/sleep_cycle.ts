@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { DreamsDB, MemoryRecord, CATEGORY_WEIGHTS } from "./db";
+import { DreamsDB, MemoryRecord, CATEGORY_WEIGHTS, DREAMS_DIR_MODE, DREAMS_FILE_MODE } from "./db";
 import {
   readRecentDialogues,
   buildDialogueSummary,
@@ -45,6 +45,18 @@ export interface DialogueCheckpoint {
 /** Separador temporal entre blocos de diálogo acumulados de ciclos distintos. */
 function dialogueAccumulationSeparator(iso: string): string {
   return `\n\n===== [Dreams] diálogo acumulado em ${iso} =====\n\n`;
+}
+
+/**
+ * Descarta explicitamente o erro de uma operação best-effort.
+ *
+ * Espelha o helper de `db.ts`: NENHUM `catch` deste módulo fica VAZIO — o
+ * bloco sempre declara a intenção ("isto é um best-effort deliberado") em vez
+ * de engolir a falha em silêncio. Usada só onde a falha NÃO pode derrubar o
+ * ciclo de sono (`chmod` em filesystem hostil, owner divergente, read-only).
+ */
+function ignoreError(error: unknown): void {
+  void error;
 }
 
 /** Opções do ciclo de sono (todas opcionais; padrão = produção). */
@@ -92,8 +104,48 @@ export class SleepCycle {
 
   private ensureDirs() {
     [this.dreamsDir, this.dailyDir, this.collectiveDir, this.personasDir].forEach(dir => {
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      if (!fs.existsSync(dir)) {
+        // TICKET-DREAMS-07 (defesa em profundidade POSIX): os diretórios do
+        // ciclo de sono são `0o700` — só o dono entra. Sem isso, os artefatos
+        // gerados aqui (`dialogue_pending.txt`, projeções `.md`, `log_*.jsonl`)
+        // nasceriam legíveis por QUALQUER usuário da máquina.
+        fs.mkdirSync(dir, { recursive: true, mode: DREAMS_DIR_MODE });
+      }
+      // O `mode` só vale na CRIAÇÃO: um diretório pré-existente (criado antes
+      // deste hardening, ou pelo `DreamsDB`) manteria a máscara antiga. O
+      // `chmod` best-effort fecha essa janela sem derrubar o ciclo.
+      this.enforceDirMode(dir);
     });
+  }
+
+  /**
+   * Garante `0o700` no diretório. Best-effort: filesystems que rejeitam o
+   * `chmod` (read-only, owner divergente) não derrubam o ciclo de sono.
+   */
+  private enforceDirMode(dir: string): void {
+    try {
+      fs.chmodSync(dir, DREAMS_DIR_MODE);
+    } catch (error) {
+      ignoreError(error);
+    }
+  }
+
+  /**
+   * Garante `0o600` num artefato do ciclo. Best-effort pela mesma razão de
+   * `enforceDirMode`.
+   *
+   * O `mode` passado na criação é aplicado pelo SO apenas quando o arquivo
+   * NÃO existe; para um artefato herdado (criado antes do hardening), este
+   * `chmod` é o que fecha a janela de leitura por outros usuários.
+   */
+  private enforceFileMode(filePath: string): void {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.chmodSync(filePath, DREAMS_FILE_MODE);
+      }
+    } catch (error) {
+      ignoreError(error);
+    }
   }
 
   /**
@@ -206,7 +258,10 @@ export class SleepCycle {
         );
       } else {
         const merged = this.mergeDialogue(existing, summary, capturedAt.toISOString());
-        fs.writeFileSync(this.dialogueFile, merged);
+        // TICKET-DREAMS-07: o handoff contém o diálogo bruto do dia — é um
+        // artefato sensível e nasce `0o600` (só o dono lê/escreve).
+        fs.writeFileSync(this.dialogueFile, merged, { mode: DREAMS_FILE_MODE });
+        this.enforceFileMode(this.dialogueFile);
         console.log(
           `[Light Sleep] Handoff acumulado (${utf8ByteLength(merged)} bytes;` +
             ` ${summary.length} chars novos) para o REM Sleep.`
@@ -317,8 +372,10 @@ export class SleepCycle {
   private writeCheckpoint(state: DialogueCheckpoint): void {
     try {
       const tmp = `${this.checkpointFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+      // TICKET-DREAMS-07: artefato de estado do handoff — `0o600`.
+      fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: DREAMS_FILE_MODE });
       fs.renameSync(tmp, this.checkpointFile);
+      this.enforceFileMode(this.checkpointFile);
     } catch (error) {
       console.error("[Dreams] Falha ao gravar dialogue_checkpoint.json:", error);
     }
@@ -593,12 +650,17 @@ export class SleepCycle {
     const data = Buffer.from(content, "utf8");
     let fd: number | null = null;
     try {
-      fd = fs.openSync(tmpPath, "w", 0o644);
+      // TICKET-DREAMS-07: as projeções de memória (`COLLECTIVE_MEMORY.md` e
+      // `personas/<agente>.md`) nascem `0o600` — antes usavam `0o644`, o que
+      // expunha a memória consolidada do ecossistema a outros usuários da
+      // máquina. O `chmod` pós-rename cobre artefatos herdados.
+      fd = fs.openSync(tmpPath, "w", DREAMS_FILE_MODE);
       fs.writeSync(fd, data);
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = null;
       fs.renameSync(tmpPath, filePath);
+      this.enforceFileMode(filePath);
     } catch (error) {
       if (fd !== null) {
         try {

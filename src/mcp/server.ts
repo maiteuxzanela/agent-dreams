@@ -32,13 +32,15 @@ import path from "path";
 import {
   DreamsDB,
   sanitizeFts5Query,
+  DREAMS_DIR_MODE,
+  DREAMS_FILE_MODE,
   type MemoryCategory,
   type MemoryRecord,
 } from "../core/db";
 import { redactSecrets } from "../core/security";
 
 export const MCP_SERVER_NAME = "dreams-mcp";
-export const MCP_SERVER_VERSION = "1.0.0";
+export const MCP_SERVER_VERSION = "1.0.3";
 
 /** Categorias canônicas aceitas por `dream_learn` (espelha `MemoryCategory`). */
 export const MEMORY_CATEGORIES = [
@@ -125,7 +127,17 @@ export function appendDailyLog(
   category: MemoryCategory,
   now: Date = new Date()
 ): string {
-  fs.mkdirSync(paths.dailyDir, { recursive: true });
+  // TICKET-DREAMS-07 (defesa em profundidade POSIX): o MCP escreve o MESMO
+  // JSONL diário que a tool `dream_learn` do plugin. Se este processo for o
+  // primeiro a criar o arquivo, ele precisa nascer `0o600` — do contrário a
+  // janela de leitura por outros usuários da máquina fica aberta.
+  fs.mkdirSync(paths.dailyDir, { recursive: true, mode: DREAMS_DIR_MODE });
+  try {
+    fs.chmodSync(paths.dailyDir, DREAMS_DIR_MODE);
+  } catch (error) {
+    // best-effort: filesystem read-only ou owner divergente.
+    void error;
+  }
   const dateStr = now.toISOString().split("T")[0];
   const file = path.join(paths.dailyDir, `log_${dateStr}.jsonl`);
   const record = {
@@ -135,7 +147,16 @@ export function appendDailyLog(
     timestamp: now.toISOString(),
     synced_to_db: true,
   };
-  fs.appendFileSync(file, JSON.stringify(record) + "\n", "utf8");
+  fs.appendFileSync(file, JSON.stringify(record) + "\n", {
+    encoding: "utf8",
+    mode: DREAMS_FILE_MODE,
+  });
+  try {
+    fs.chmodSync(file, DREAMS_FILE_MODE);
+  } catch (error) {
+    // best-effort: artefato herdado em filesystem hostil.
+    void error;
+  }
   return file;
 }
 

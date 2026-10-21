@@ -27,12 +27,13 @@ Diferente de sistemas rudimentares que apenas salvam logs de telemetria ("sessã
 │                       FASE 1: LIGHT SLEEP (Ingestão)                   │
 │  • Lê opencode.db (read-only, últimas 24h)                             │
 │  • Filtra payloads de ferramentas, diffs de código e ruídos            │
-│  • Buffer seguro de 120.000 chars com truncamento invertido           │
+│  • Handoff integral (sem truncamento); o REM fatia em chunks           │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │ (dialogue_pending.txt)
                                    ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                       FASE 2: REM SLEEP (Destilação)                   │
+│  • Ingestão integral: fatia o dia em chunks e sintetiza cada um        │
 │  • Prompt cognitivo estruturado (extrai apenas lições com valor futuro)│
 │  • Cascata: 1º Gemini 3.8 Flash ──> 2º Mimo v2.6 Flash ──> 3º DeepSeek │
 │  • Sem IA disponível? Lança erro explícito e preserva o handoff        │
@@ -117,15 +118,18 @@ LLM externa.
 ### 1. Light Sleep (`src/core/session_reader.ts`)
 * Abre a base SQLite `~/.local/share/opencode/opencode.db` em modo **estritamente read-only** (`{ readonly: true }`).
 * Captura apenas blocos de texto reais trocados entre usuário e agentes (`user` e `assistant`).
-* **Truncamento Invertido:** Se o dia exceder 120.000 caracteres (~28k tokens), o sistema fatia o início do dia com o prefixo `[… início do dia omitido]`, garantindo que as instruções e correções mais recentes da tarde e noite **nunca sejam perdidas**.
+* **Handoff integral (sem truncamento):** o Light Sleep entrega ao REM Sleep o diálogo do dia **completo**, do início ao fim — não há descarte do começo do dia nem prefixo de omissão. O particionamento em fatias seguras é responsabilidade do REM Sleep (ver abaixo).
+* A captura é delimitada por um *checkpoint* durável (`dialogue_checkpoint.json`): a fronteira avança sempre, e o `dialogue_pending.txt` **preserva** o que ainda não foi sintetizado.
 
 ### 2. REM Sleep (`src/core/mimo_synthesizer.ts`)
+* **Ingestão particionada e integral:** o handoff recebido do Light Sleep é **particionado em chunks sequenciais** (`chunkDialogueText`), cada um respeitando um teto de caracteres **e** de bytes UTF-8 (~100k chars / ~110k bytes por fatia). Cada fatia é sintetizada **individualmente** e as memórias são agregadas. O resultado é que dias com **mais de 120.000 caracteres** são processados por completo — o diálogo é preservado **do início ao fim do dia**, sem descarte de contexto e sem prefixo de omissão.
 * Processa o texto com destilador cognitivo que devolve um array JSON de memórias atômicas.
 * **Cascata Resiliente de Modelos:**
   1. `google/antigravity-gemini-3.8-flash` (prioridade da cota Antigravity).
   2. `opencode/mimo-v2.6-flash-free` (degrau gratuito de fallback).
   3. `opencode-go/deepseek-v4.1-flash` (terceiro degrau de contingência).
 * **Política Anti-Falsificação:** Se nenhum modelo de IA estiver disponível ou em modo `DREAMS_OFFLINE=1`, o sistema **não inventa fatos**. Ele emite um erro explícito e mantém `dialogue_pending.txt` intacto no disco para reprocessar na noite seguinte.
+* **Adiamento atômico:** uma falha em **qualquer** chunk adia a consolidação **inteira** — o handoff permanece 100% íntegro no disco, e o `dialogue_pending.txt` só é removido quando **todos** os chunks foram sintetizados com sucesso.
 
 ### 3. Deep Sleep (`src/core/sleep_cycle.ts`)
 * Aplica decaimento temporal exponencial baseado no tempo desde o último reforço (`last_reinforced`, com fallback em `created_at`), com **amortecimento sublinear (logarítmico) do uso** — repetições triviais não inflam o score linearmente:

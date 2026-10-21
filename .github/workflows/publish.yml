@@ -46,7 +46,7 @@ jobs:
       - name: Setup Node (runtime do npm publish e da guarda de integridade)
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies (lockfile congelado)
@@ -108,6 +108,14 @@ jobs:
           fi
 
       - name: Publish to NPM
-        run: npm publish --access public --provenance
+        # TICKET-DREAMS-07 (LOGS3): o `npm publish` abortava com `ENEEDAUTH`
+        # quando o secret `NPM_TOKEN` estava ausente/vazio no repositório. A
+        # guarda abaixo falha ANTES da tentativa de publicação, com mensagem
+        # explícita, para que a causa raiz (secret não configurado) fique
+        # visível no log em vez de ser mascarada por um erro de credencial.
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then echo "::error::NODE_AUTH_TOKEN (secrets.NPM_TOKEN) está vazio! Configure o secret no repositório." && exit 1; fi
+          npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

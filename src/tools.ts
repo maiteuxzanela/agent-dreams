@@ -1,4 +1,4 @@
-import { DreamsDB, type MemoryCategory } from "./core/db";
+import { DreamsDB, type MemoryCategory, DREAMS_DIR_MODE, DREAMS_FILE_MODE } from "./core/db";
 import { redactSecrets } from "./core/security";
 import fs from "fs";
 import path from "path";
@@ -6,6 +6,36 @@ import os from "os";
 
 const DREAMS_DIR = path.join(os.homedir(), ".config/opencode/dreams");
 const DAILY_DIR = path.join(DREAMS_DIR, "daily");
+
+/**
+ * Descarta explicitamente o erro de uma operação best-effort (espelha o
+ * helper de `db.ts`): NENHUM `catch` deste arquivo fica VAZIO — o bloco
+ * declara a intenção em vez de engolir a falha em silêncio.
+ */
+function ignoreError(error: unknown): void {
+  void error;
+}
+
+/**
+ * TICKET-DREAMS-07 (defesa em profundidade POSIX) — artefatos satélite da
+ * vigília.
+ *
+ * O JSONL diário (`dreams/daily/log_<data>.jsonl`) é a fonte de verdade
+ * durável do que o agente aprendeu: nasce `0o600` (só o dono lê/escreve) em
+ * um diretório `0o700`. Sem esse endosso, o umask do processo (tipicamente
+ * `0o644`) deixaria o aprendizado do ecossistema legível por QUALQUER usuário
+ * da máquina. O `chmod` pós-escrita fecha a janela para arquivos herdados,
+ * criados antes do hardening.
+ */
+function enforceDailyLogMode(file: string): void {
+  try {
+    if (fs.existsSync(file)) {
+      fs.chmodSync(file, DREAMS_FILE_MODE);
+    }
+  } catch (error) {
+    ignoreError(error);
+  }
+}
 
 // DEF-03: escopo válido é 'collective' ou 'agent:<nome>' com nome seguro.
 // Bloqueia Directory Traversal e escopos malformados.
@@ -59,7 +89,15 @@ export function dream_learn(
 
   const dailyDir = options.dailyDir ?? DAILY_DIR;
   if (!fs.existsSync(dailyDir)) {
-    fs.mkdirSync(dailyDir, { recursive: true });
+    // TICKET-DREAMS-07: diretório de logs `0o700` (só o dono entra).
+    fs.mkdirSync(dailyDir, { recursive: true, mode: DREAMS_DIR_MODE });
+  }
+  try {
+    fs.chmodSync(dailyDir, DREAMS_DIR_MODE);
+  } catch (error) {
+    // best-effort: diretório pré-existente em filesystem read-only ou de
+    // outro owner não pode abortar o registro do aprendizado.
+    ignoreError(error);
   }
 
   const dateStr = new Date().toISOString().split("T")[0];
@@ -91,7 +129,10 @@ export function dream_learn(
   }
 
   // Fonte de verdade durável da vigília: o JSONL diário (ingerido no Light Sleep).
-  fs.appendFileSync(file, JSON.stringify(record) + "\n");
+  // TICKET-DREAMS-07: nasce `0o600` — o aprendizado do agente não é público
+  // para os demais usuários da máquina.
+  fs.appendFileSync(file, JSON.stringify(record) + "\n", { mode: DREAMS_FILE_MODE });
+  enforceDailyLogMode(file);
 
   return `Memory logged to daily stream for scope '${args.scope}'. Will be consolidated tonight.`;
 }

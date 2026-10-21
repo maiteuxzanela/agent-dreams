@@ -3,3 +3,10 @@ node_modules/
 .DS_Store
 dist/
 pack-manifest.json
+
+# Metadados locais de orquestração (TICKET-DREAMS-07): o quadro de tarefas e a
+# configuração do OpenCode são estado da MÁQUINA, não artefatos do pacote.
+# Sem estas entradas, um `git add .` acidental versionaria metadados da
+# sessão local no repositório público.
+kanban.json
+opencode.json

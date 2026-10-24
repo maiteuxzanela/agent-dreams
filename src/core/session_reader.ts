@@ -16,10 +16,19 @@
  * Defesa anti-recursão: sessões internas do Dreams (títulos canônicos
  * `"Dreams Synthesis"` — a síntese diária — e `"Dreams Reconciliation"` — o
  * julgamento neural de reconciliação do Sono REM) são excluídas em duas
- * camadas — filtro SQL via `session.data.title` e revalidação em JS no
- * momento da emissão — de modo que a síntese (ou a reconciliação) de um dia
- * nunca seja reprocessada como diálogo de usuário no dia seguinte. A lista é
- * configurável por `excludeSessionTitles`.
+ * camadas — filtro SQL e revalidação em JS no momento da emissão — de modo
+ * que a síntese (ou a reconciliação) de um dia nunca seja reprocessada como
+ * diálogo de usuário no dia seguinte. A lista é configurável por
+ * `excludeSessionTitles`.
+ *
+ * TICKET-DREAMS-09 — EVOLUÇÃO LEGÍTIMA DO SCHEMA DE `session`: o OpenCode
+ * 1.18.34 normalizou a tabela e passou a expor `title` como COLUNA nativa
+ * (antes o título vivia em `data` JSON). A exclusão anti-recursão detecta a
+ * fonte REAL do título via `PRAGMA table_info` — `title` no schema novo,
+ * `data` no legado — e monta o filtro correspondente, sempre com parâmetros
+ * vinculados (nunca interpolando título em SQL). Divergência de schema só é
+ * REPORTADA quando NENHUMA das duas fontes existe (aí, sim, a anti-recursão
+ * fica inativa); a evolução `data` → `title` não é mais alarme.
  *
  * TICKET-DREAMS-06-FIX (BLOQUEANTE 1): o título `"Dreams Reconciliation"`
  * entrou na lista canônica porque o julgamento neural de reconciliação roda
@@ -122,8 +131,10 @@ export interface SessionReaderOptions {
   /** Corte de caracteres por trecho; `0` ou `Infinity` desliga. Padrão: 4000. */
   maxTextLength?: number;
   /**
-   * Títulos de sessão a excluir da leitura (comparação exata contra
-   * `session.data.title`). Padrão: `["Dreams Synthesis", "Dreams Reconciliation"]`.
+   * Títulos de sessão a excluir da leitura (comparação EXATA contra a fonte
+   * de título do schema real: a coluna `title` no schema normalizado do
+   * OpenCode, ou `data` JSON no legado). Padrão:
+   * `["Dreams Synthesis", "Dreams Reconciliation"]`.
    * Passe `[]` para desligar a exclusão. Quando a tabela `session` não existe
    * (schema divergente), a exclusão degrada para vazio — e a divergência é
    * REPORTADA via `onError` (sem abortar a leitura), porque a defesa
@@ -196,6 +207,42 @@ export function defaultSessionDbPath(): string {
   return path.join(os.homedir(), ".local/share/opencode/opencode.db");
 }
 
+/**
+ * TICKET-DREAMS-09 — exclusão anti-recursão por TÍTULO, em DUAS variantes
+ * ESTÁTICAS (o schema real decide qual executar; nada é concatenado):
+ *
+ *  - `SQL_EXCLUDED_BY_TITLE` — schema NORMALIZADO do OpenCode (>= 1.18.34),
+ *    onde `title` é coluna nativa da tabela `session`;
+ *  - `SQL_EXCLUDED_BY_DATA_TITLE` — schema LEGADO, onde o título vive no JSON
+ *    de `data` (`json_valid` blinda contra JSON malformado isolado).
+ *
+ * Em AMBAS a lista de títulos entra como PARÂMETRO JSON expandido por
+ * `json_each`: nenhum título (nem qualquer valor externo) é interpolado na
+ * string SQL. Comparação EXATA, como exige a defesa anti-recursão.
+ */
+const SQL_EXCLUDED_BY_TITLE = `
+      SELECT s.id AS id
+        FROM session s
+       WHERE s.title IN (SELECT value FROM json_each(?))`;
+
+const SQL_EXCLUDED_BY_DATA_TITLE = `
+      SELECT s.id AS id
+        FROM session s
+       WHERE json_valid(s.data)
+         AND json_extract(s.data, '$.title') IN (SELECT value FROM json_each(?))`;
+
+/**
+ * Schema TRANSICIONAL (as duas colunas coexistem durante a normalização):
+ * o título é procurado nas DUAS fontes, porque linhas antigas podem ter
+ * `title` nulo com o título ainda em `data`. Dois parâmetros idênticos.
+ */
+const SQL_EXCLUDED_BY_TITLE_OR_DATA = `
+      SELECT s.id AS id
+        FROM session s
+       WHERE s.title IN (SELECT value FROM json_each(?))
+          OR (json_valid(s.data)
+              AND json_extract(s.data, '$.title') IN (SELECT value FROM json_each(?)))`;
+
 // ---------------------------------------------------------------------------
 // TICKET-DREAMS-04 — Checagem preventiva de schema do OpenCode
 // ---------------------------------------------------------------------------
@@ -217,8 +264,27 @@ const SESSION_SCHEMA_TABLE_SET: ReadonlySet<string> = new Set(SESSION_SCHEMA_TAB
 export const SESSION_SCHEMA_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   message: ["id", "session_id", "time_created", "data"],
   part: ["id", "message_id", "time_created", "data"],
-  session: ["id", "data"],
+  // TICKET-DREAMS-09: a tabela `session` só exige a IDENTIDADE. A fonte do
+  // título é polimórfica (`title` no schema normalizado, `data` no legado) e
+  // qualquer uma das duas satisfaz a anti-recursão — ver SESSION_TITLE_COLUMNS.
+  session: ["id"],
 };
+
+/**
+ * Colunas ACEITAS como fonte do título de sessão, em ordem de preferência.
+ *
+ *  - `title` — schema NORMALIZADO do OpenCode (>= 1.18.34): coluna nativa,
+ *    comparada diretamente com `IN (SELECT value FROM json_each(?))`.
+ *  - `data` — schema LEGADO: o título vive em `data` JSON, lido por
+ *    `json_extract(data, '$.title')` com `json_valid` como guarda.
+ *
+ * A presença de QUALQUER uma delas torna o schema legítimo; a ausência das
+ * duas é a única divergência real que desliga a anti-recursão.
+ */
+export const SESSION_TITLE_COLUMNS = ["title", "data"] as const;
+
+/** Fonte real do título de uma tabela `session`. */
+export type SessionTitleColumn = (typeof SESSION_TITLE_COLUMNS)[number];
 
 /**
  * Tabelas cuja AUSÊNCIA invalida a leitura. `session` NÃO entra: ela é
@@ -295,7 +361,7 @@ function buildSessionSchemaMessage(
   return (
     `Schema do banco de sessões do OpenCode incompatível (${dbPath}): ${details}. ` +
     `O Dreams espera as tabelas 'message' (id, session_id, time_created, data), ` +
-    `'part' (id, message_id, time_created, data) e 'session' (id, data). ` +
+    `'part' (id, message_id, time_created, data) e 'session' (id e title OU data). ` +
     `Atualize o OpenCode para a versão que o Dreams suporta ou aponte o caminho ` +
     `correto do banco de sessões.`
   );
@@ -316,6 +382,11 @@ function tableColumns(db: Database, table: string): Set<string> {
  * as divergências encontradas (tabela ausente ou coluna crítica ausente).
  *
  * Leve e somente-leitura: 3 PRAGMAs — nenhuma query sobre as tabelas.
+ *
+ * TICKET-DREAMS-09: a tabela `session` aceita DUAS gerações legítimas —
+ * `title` nativo (OpenCode normalizado) ou `data` JSON (legado). A evolução
+ * `data` → `title` NÃO é divergência; só é reportada (advisory) quando a
+ * tabela some ou quando nenhuma das fontes de título existe.
  */
 export function inspectSessionSchema(db: Database): SessionSchemaDivergence[] {
   const divergences: SessionSchemaDivergence[] = [];
@@ -339,12 +410,19 @@ export function inspectSessionSchema(db: Database): SessionSchemaDivergence[] {
     const missingColumns = SESSION_SCHEMA_COLUMNS[table].filter(
       (column) => !columns.has(column)
     );
+
+    // TICKET-DREAMS-09: sem NENHUMA fonte de título a anti-recursão fica
+    // inativa — aí a degradação é real e precisa ser reportada.
+    if (table === "session" && !SESSION_TITLE_COLUMNS.some((column) => columns.has(column))) {
+      missingColumns.push(...SESSION_TITLE_COLUMNS);
+    }
+
     if (missingColumns.length > 0) {
       divergences.push({
         table,
         severity,
         missingTable: false,
-        missingColumns: [...missingColumns],
+        missingColumns,
       });
     }
   }
@@ -377,33 +455,63 @@ function normalizeRole(raw: unknown): DialogRole {
 }
 
 /**
+ * Detecta a FONTE REAL do título da tabela `session` inspecionando as colunas
+ * existentes (`PRAGMA table_info`).
+ *
+ * TICKET-DREAMS-09: o schema do OpenCode evoluiu de `data` JSON para a coluna
+ * nativa `title`. Quando as duas coexistem (schema transicional), devolve
+ * `title` — a coleta de exclusões consulta as DUAS fontes nesse caso, para não
+ * perder linhas antigas cujo título ainda está só em `data`.
+ *
+ * Fail-soft por contrato: tabela ausente, banco ilegível ou nenhuma coluna
+ * aceita devolvem `null` (o chamador degrada para "sem exclusões", sem throw).
+ */
+export function detectSessionTitleColumn(db: Database): SessionTitleColumn | null {
+  try {
+    const columns = tableColumns(db, "session");
+    for (const column of SESSION_TITLE_COLUMNS) {
+      if (columns.has(column)) return column;
+    }
+    return null;
+  } catch {
+    // Banco fechado/corrompido ou PRAGMA indisponível → degradação silenciosa.
+    return null;
+  }
+}
+
+/**
  * Coleta os IDs de sessões cujo título bate com `titles`.
  *
  * Defesa em profundidade (camada 1 — SQL): resolve as sessões internas do
  * Dreams uma única vez, fora da query quente, consultando a tabela `session`.
+ * A consulta executada depende do formato REAL do schema (TICKET-DREAMS-09):
+ * `title` nativo no schema normalizado, `data` JSON no legado e, no schema
+ * TRANSICIONAL (ambos presentes), a união das duas fontes. Os títulos entram
+ * sempre como parâmetro JSON (`json_each`), nunca interpolados.
+ *
  * É deliberadamente fail-soft: se a tabela não existir (schemas antigos,
- * fixtures de teste) ou `session.data` não for JSON válido, retorna `[]` em vez
- * de derrubar a leitura. Nunca interpola valores no SQL — a lista de títulos
- * entra como parâmetro JSON e é expandida por `json_each`.
+ * fixtures de teste), não expuser nenhuma fonte de título, ou `session.data`
+ * não for JSON válido, retorna `[]` em vez de derrubar a leitura.
  */
 function collectExcludedSessionIds(db: Database, titles: readonly string[]): string[] {
   if (titles.length === 0) return [];
   try {
-    const tableExists = db
-      .query<{ name: string }, []>(
-        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session'`
-      )
-      .get();
-    if (!tableExists) return [];
+    const columns = tableColumns(db, "session");
+    const byTitle = columns.has("title");
+    const byData = columns.has("data");
+    if (!byTitle && !byData) return [];
 
-    const rows = db
-      .query<{ id: string | null }, [string]>(
-        `SELECT s.id AS id
-           FROM session s
-          WHERE json_valid(s.data)
-            AND json_extract(s.data, '$.title') IN (SELECT value FROM json_each(?))`
-      )
-      .all(JSON.stringify(titles));
+    const titlesJson = JSON.stringify(titles);
+    const rows =
+      byTitle && byData
+        ? db
+            .query<{ id: string | null }, [string, string]>(SQL_EXCLUDED_BY_TITLE_OR_DATA)
+            .all(titlesJson, titlesJson)
+        : byTitle
+          ? db.query<{ id: string | null }, [string]>(SQL_EXCLUDED_BY_TITLE).all(titlesJson)
+          : db
+              .query<{ id: string | null }, [string]>(SQL_EXCLUDED_BY_DATA_TITLE)
+              .all(titlesJson);
 
     return rows
       .map((row) => row.id)

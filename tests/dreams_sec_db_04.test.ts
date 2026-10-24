@@ -57,6 +57,7 @@ import {
   readRecentDialogueSummary,
   SESSION_SCHEMA_TABLES,
   SESSION_SCHEMA_COLUMNS,
+  SESSION_TITLE_COLUMNS,
   DEFAULT_EXCLUDED_SESSION_TITLES,
 } from "../src/core/session_reader";
 
@@ -702,7 +703,11 @@ describe("[DREAMS-04/3] session_reader.ts: checagem preventiva de schema", () =>
     expect([...SESSION_SCHEMA_TABLES]).toEqual(["message", "part", "session"]);
     expect(SESSION_SCHEMA_COLUMNS.message).toEqual(["id", "session_id", "time_created", "data"]);
     expect(SESSION_SCHEMA_COLUMNS.part).toEqual(["id", "message_id", "time_created", "data"]);
-    expect(SESSION_SCHEMA_COLUMNS.session).toEqual(["id", "data"]);
+    // TICKET-DREAMS-09: de `session` só se exige a identidade — a fonte do
+    // título é polimórfica (`title` nativo OU `data` JSON legado), e ambas
+    // sustentam a exclusão anti-recursão.
+    expect(SESSION_SCHEMA_COLUMNS.session).toEqual(["id"]);
+    expect([...SESSION_TITLE_COLUMNS]).toEqual(["title", "data"]);
   });
 
   test("schema completo ⇒ nenhuma divergência e a leitura funciona", () => {

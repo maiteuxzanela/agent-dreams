@@ -71,6 +71,20 @@ function openRaw(dbPath: string = DB_PATH): Database {
   return raw;
 }
 
+/**
+ * Executa SQL real na instância SQLite subjacente do `DreamsDB`.
+ *
+ * Usado para INJETAR sentinelas temporais determinísticas: em runners de CI
+ * muito rápidos, `insertMemory` seguido de `mergeMemories` pode cair no MESMO
+ * milissegundo, e `last_reinforced` do registro base ficaria idêntico ao do
+ * merge — tornando a asserção de avanço temporal um flake dependente da
+ * velocidade da máquina. Fixar o carimbo original num instante anterior
+ * remove a dependência do relógio real.
+ */
+function rawRun(target: DreamsDB, sql: string, params: any[] = []): void {
+  (target as any).db.run(sql, params);
+}
+
 beforeAll(() => {
   db = new DreamsDB(DB_PATH);
 });
@@ -391,14 +405,20 @@ describe("DREAMS-06A — Cenário 5: mergeMemories", () => {
   });
 
   test("5.1: score = min(5.0, max(score_A, score_B) + 0.5) e confirmations = max + 1", () => {
+    // Instante FIXO para o carimbo original: garante que o `last_reinforced`
+    // gravado pelo merge (instante corrente) seja observavelmente posterior,
+    // independentemente da velocidade da máquina ou do runner de CI.
+    const SENTINEL = "2026-01-01T00:00:00.000Z";
     const existingId = dbMerge.insertMemory("collective", EXISTING_FACT, "decision", 2.0, 0.3);
     const candidateId = dbMerge.insertMemory("collective", CANDIDATE_FACT, "decision", 3.0, 0.3);
     // Pré-condição: as duas memórias são registros DISTINTOS (sem colapso).
     expect(candidateId).not.toBe(existingId);
+    rawRun(dbMerge, "UPDATE memories SET last_reinforced = ? WHERE id = ?", [SENTINEL, existingId]);
     const existing = dbMerge.getMemoryById(existingId)!;
     const candidate = dbMerge.getMemoryById(candidateId)!;
     expect(existing.score).toBe(2.0);
     expect(candidate.score).toBe(3.0);
+    expect(existing.last_reinforced).toBe(SENTINEL);
 
     const mergedId = dbMerge.mergeMemories(
       existingId,
@@ -416,6 +436,8 @@ describe("DREAMS-06A — Cenário 5: mergeMemories", () => {
     expect(merged.confirmations).toBe(2); // max(1, 1) + 1
     expect(merged.fact).toBe(MERGED_FACT);
     expect(merged.last_reinforced).not.toBe(existing.last_reinforced);
+    expect(merged.last_reinforced).not.toBe(SENTINEL);
+    expect(Date.parse(merged.last_reinforced)).toBeGreaterThan(Date.parse(SENTINEL));
   });
 
   test("5.1b: o bônus de score é TETADO em 5.0 (nunca ultrapassa o teto)", () => {

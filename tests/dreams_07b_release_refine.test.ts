@@ -7,7 +7,7 @@
  *
  * O que esta suíte PROVA:
  *
- * 1. BUMP COORDENADO v1.0.4 — a versão é uma só em três lugares:
+ * 1. BUMP COORDENADO v1.0.5 — a versão é uma só em três lugares:
  *    `package.json` (manifesto), `MCP_SERVER_VERSION` (constante REAL importada
  *    do módulo de produção) e o CHANGELOG (primeira seção semver). O
  *    manifesto não pode listar diretório inexistente em `files`.
@@ -190,12 +190,12 @@ function buildSessionDb(dir: string, msgs: FMsg[]): string {
 }
 
 // ===========================================================================
-// 1 — BUMP COORDENADO v1.0.4
+// 1 — BUMP COORDENADO v1.0.5
 // ===========================================================================
 
-describe("DREAMS-07 · bump coordenado v1.0.4", () => {
-  test("o manifesto declara 1.0.4 (semver puro)", () => {
-    expect(PKG.version).toBe("1.0.4");
+describe("DREAMS-07 · bump coordenado v1.0.5", () => {
+  test("o manifesto declara 1.0.5 (semver puro)", () => {
+    expect(PKG.version).toBe("1.0.5");
     expect(/^\d+\.\d+\.\d+$/.test(PKG.version)).toBe(true);
   });
 
@@ -204,7 +204,7 @@ describe("DREAMS-07 · bump coordenado v1.0.4", () => {
     expect(MCP_SERVER_VERSION).toBe(PKG.version);
   });
 
-  test("o CHANGELOG documenta 1.0.4 como PRIMEIRA versão semver", () => {
+  test("o CHANGELOG documenta 1.0.5 como PRIMEIRA versão semver", () => {
     const changelog = readText(CHANGELOG_PATH);
     const headings = [...changelog.matchAll(/^##\s+\[([^\]]+)\]/gm)].map((m) => m[1]);
     const semvers = headings.filter((h) => /^\d+\.\d+\.\d+$/.test(h.trim()));
@@ -513,7 +513,11 @@ describe("DREAMS-07 · hardening POSIX — diretórios 0o700 e artefatos 0o600",
         { scope: "collective", fact: "Fato tool sob umask adversarial", category: "learning" },
         { dailyDir, db }
       );
-      const toolFile = path.join(dailyDir, `log_2026-10-21.jsonl`);
+      // `dream_learn` grava sempre com a data de HOJE (`new Date()`), então o
+      // nome do arquivo precisa ser calculado dinamicamente para o teste ser
+      // determinístico em qualquer dia.
+      const today = new Date().toISOString().slice(0, 10);
+      const toolFile = path.join(dailyDir, `log_${today}.jsonl`);
       expect(fs.existsSync(toolFile)).toBe(true);
       expect(modeOf(toolFile)).toBe(0o600);
       expect(modeOf(dailyDir)).toBe(0o700);

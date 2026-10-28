@@ -40,7 +40,7 @@ import {
 import { redactSecrets } from "../core/security";
 
 export const MCP_SERVER_NAME = "dreams-mcp";
-export const MCP_SERVER_VERSION = "1.0.4";
+export const MCP_SERVER_VERSION = "1.0.5";
 
 /** Categorias canônicas aceitas por `dream_learn` (espelha `MemoryCategory`). */
 export const MEMORY_CATEGORIES = [

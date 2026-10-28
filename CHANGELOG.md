@@ -30,6 +30,49 @@ nativamente pelo Bun.
 
 ---
 
+## [1.0.5] - 2026-10-27
+
+Corte de release que publica a blindagem do **Light Sleep** contra o schema
+normalizado do `opencode.db` (1.18.34+) e arquiva a RFC da Reconciliação
+Cognitiva em Duas Etapas, preparando a esteira de publicação no npm.
+
+### Bump coordenado para `1.0.5`
+
+- **Alterado** — `package.json`: `"version"` elevada de `1.0.4` para `1.0.5`,
+  em *lockstep* com a *tag* de release (`v1.0.5`) e a seção deste `CHANGELOG.md`.
+- **Alterado** — `src/mcp/server.ts`: `MCP_SERVER_VERSION` passa de `"1.0.4"` para
+  `"1.0.5"`, mantendo a coerência entre a versão anunciada pelo servidor MCP
+  (`initialize` / `serverInfo`) e a versão real do pacote.
+
+### Runtime — anti-recursão do Light Sleep (`TICKET-DREAMS-09`)
+
+- **Corrigido** — o **Light Sleep** passa a ignorar as sessões internas do próprio
+  Dreams (títulos `Dreams Synthesis` e `Dreams Reconciliation`) também sob o
+  **schema normalizado** do `opencode.db` a partir da versão **1.18.34+**, onde o
+  título da sessão deixa de residir em uma coluna denormalizada e passa a ser
+  resolvido por junção. Sem essa guarda, o ciclo capturava o próprio diálogo de
+  síntese/reconciliação como entrada, realimentando recursivamente a captura de
+  diálogo. A detecção foi movida para o ponto único de leitura de sessão
+  (`DEFAULT_EXCLUDED_SESSION_TITLES` em `src/core/session_reader.ts`), cobrindo
+  ambos os layouts de schema, com teste determinístico dedicado que prova que
+  sessões com esses títulos são ignoradas.
+
+### Documentação
+
+- **Adicionado** — a **RFC de Reconciliação Cognitiva em Duas Etapas (Sono REM)**
+  foi arquivada em `docs/`, preservando o desenho da triagem Jaccard + classificador
+  de 4 ações como referência histórica do ciclo cognitivo.
+
+### Testes
+
+- **Corrigido** — o teste de *umask* adversarial (`tests/dreams_07b_release_refine.test.ts`)
+  deixou de fixar a data literal `log_2026-10-21.jsonl` e passou a derivar o nome
+  do JSONL da **data corrente** (`new Date().toISOString().slice(0, 10)`), pois
+  `dream_learn` grava sempre com `new Date()`. A suíte fica 100% determinística e
+  verde em qualquer dia de execução, sem depender do relógio do ambiente.
+
+---
+
 ## [1.0.4] - 2026-10-21
 
 Corte de release que **absorve** o corte `1.0.3` (nunca publicado no registry) e

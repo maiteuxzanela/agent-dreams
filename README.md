@@ -13,7 +13,7 @@ O **Agent Dreams** resolve o problema clássico de perda de contexto e amnésia 
 
 ## 🧠 Como Funciona a Arquitetura Tri-Fásica
 
-Diferente de sistemas rudimentares que apenas salvam logs de telemetria ("sessão finalizada", "sessão compactada"), o Agent Dreams executa um ciclo cognitivo estruturado em três fases de sono mais a vigília ativa:
+O Agent Dreams executa um ciclo cognitivo estruturado em três fases de sono mais a vigília ativa:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -25,7 +25,7 @@ Diferente de sistemas rudimentares que apenas salvam logs de telemetria ("sessã
                                    ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                       FASE 1: LIGHT SLEEP (Ingestão)                   │
-│  • Lê opencode.db (read-only, últimas 24h)                             │
+│  • Lê histórico da conversas (read-only, últimas 24h)                  │
 │  • Filtra payloads de ferramentas, diffs de código e ruídos            │
 │  • Handoff integral (sem truncamento); o REM fatia em chunks           │
 └──────────────────────────────────┬─────────────────────────────────────┘
@@ -35,8 +35,7 @@ Diferente de sistemas rudimentares que apenas salvam logs de telemetria ("sessã
 │                       FASE 2: REM SLEEP (Destilação)                   │
 │  • Ingestão integral: fatia o dia em chunks e sintetiza cada um        │
 │  • Prompt cognitivo estruturado (extrai apenas lições com valor futuro)│
-│  • Cascata: 1º Gemini 3.8 Flash ──> 2º Mimo v2.6 Flash ──> 3º DeepSeek │
-│  • Sem IA disponível? Lança erro explícito e preserva o handoff        │
+│                                                                        │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │ (memórias persistidas no DreamsDB)
                                    ▼
